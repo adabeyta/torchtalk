@@ -1,0 +1,20 @@
+# TorchTalk v1.0 Requirements
+# Core dependencies for PyTorch repository analysis and LLM interaction
+
+# Web Framework
+fastapi==0.104.1
+uvicorn==0.24.0
+pydantic==2.5.0
+
+# UI
+gradio==4.7.1
+
+# HTTP Client
+requests==2.31.0
+
+# Code Analysis
+networkx==3.2.1
+tiktoken==0.5.1
+
+# Utilities
+rich==13.7.0
