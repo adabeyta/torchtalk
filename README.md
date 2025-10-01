@@ -1,94 +1,77 @@
-# TorchTalk v1.0
+# TorchTalk
 
-An intelligent PyTorch repository analysis and chat system that combines graph-based context retrieval with adaptive response generation.
+An intelligent code assistant for PyTorch codebases with semantic search and multi-language support (Python/C++/CUDA). Uses LlamaIndex for code understanding with hybrid retrieval combining vector search, graph augmentation, and re-ranking.
 
 ## Features
 
-- **Graph-based Context Retrieval**: Analyzes import graphs and call graphs to understand code relationships
-- **Semantic Search**: Intelligent pattern matching and keyword-based content discovery
-- **Adaptive Response System**: Adjusts response style based on question relevance to PyTorch
-- **Multi-modal Interfaces**: CLI, REST API, and Gradio web UI
-- **Scalable Architecture**: Supports multiple context profiles (4K, 128K, 1M tokens)
-- **Automatic Analysis**: Repository analysis runs automatically when needed
+- **Multi-language support**: Python, C++, and CUDA with cross-language binding detection
+- **Hybrid retrieval**: Vector search + graph augmentation + re-ranking for precise results
+- **Graph-based analysis**: Import, call, and inheritance graphs using NetworkX
+- **Adaptive context building**: Dynamic query classification and context assembly
+- **Web UI**: Gradio interface with chat history and streaming responses
+- **vLLM integration**: Efficient LLM inference with tensor parallelism support
+
+## Installation
+
+```bash
+pip install -e .
+```
 
 ## Quick Start
 
-### 1. Installation
-
 ```bash
-# Clone the repository
-git clone https://github.com/yourusername/torchtalk.git
-cd torchtalk
+# Index a repository (required first step)
+torchtalk index /path/to/pytorch
 
-# Install dependencies
-pip install -r requirements.txt
+# Start chat interface with web UI
+torchtalk chat /path/to/pytorch
+
+# Use a specific model
+torchtalk chat /path/to/pytorch --model meta-llama/Llama-3.1-70B-Instruct
+
+# Use tensor parallelism for large models
+torchtalk chat /path/to/pytorch --model meta-llama/Llama-3.1-70B-Instruct --tp 8
 ```
 
-### 2. Start TorchTalk
+## Basic Usage
 
+### Indexing
 ```bash
-# Basic usage
-python torchtalk.py start --repo /path/to/pytorch
+# Force rebuild existing index
+torchtalk index /path/to/pytorch --rebuild
 
-# With custom model and context size
-python torchtalk.py start --repo /path/to/pytorch \
-  --context production_128k \
-  --model meta-llama/Llama-3.2-8B-Instruct
+# Check index status
+torchtalk status /path/to/pytorch
 ```
 
-The system will:
-1. Automatically analyze the repository if needed
-2. Build knowledge graphs and semantic indices
-3. Start all services:
-   - vLLM server on port 8000
-   - FastAPI backend on port 8001
-   - Gradio UI on port 7860
+### Chat Commands
+The `chat` command automatically starts:
+- vLLM server (port 8080)
+- FastAPI backend (port 8001)
+- Gradio UI (port 7860)
 
-### 3. Access the System
+A public link will be posted at successful startup.
 
-- **Web UI**: http://localhost:7860
-- **API**: http://localhost:8001/docs
-- **Health Check**: http://localhost:8001/health
+### Query Types
+TorchTalk automatically handles different query types:
+- **Location**: "Where is the optimizer implementation?"
+- **Call Stack**: "How does backward() call autograd?"
+- **Architecture**: "What is the structure of the nn.Module?"
+- **Implementation**: "How does DataLoader work?"
+- **Explanation**: "What does torch.compile do?"
 
 ## Architecture
 
-### Core Components
-
-- **`torchtalk.py`**: Main CLI that orchestrates analysis and services
-- **`repo_analyzer.py`**: Analyzes repositories and builds knowledge graphs
-- **`graph_context_retriever.py`**: Graph-based context retrieval using NetworkX
-- **`semantic_search.py`**: Semantic search and pattern matching
-- **`adaptive_response_manager.py`**: Intelligently adjusts response style based on relevance
-- **`app.py`**: FastAPI REST service
-- **`ui.py`**: Gradio web interface
-
-### Context Profiles
-
-| Profile | Context Window | Use Case |
-|---------|---------------|----------|
-| `dev` | 4K tokens | Development and testing |
-| `production_128k` | 128K tokens | Standard production use |
-| `production_1m` | 1M tokens | Large-scale analysis |
+- **Indexing** (`torchtalk/indexing/`): Embeddings, vector store, index building
+- **Analysis** (`torchtalk/analysis/`): Graph construction, chunking, parsing
+- **Retrieval** (`torchtalk/retrieval/`): Hybrid search, re-ranking, adaptive context
+- **Web** (`torchtalk/web/`): FastAPI + Gradio interfaces
 
 ## Configuration
 
-Configuration can be managed through:
-- Command line arguments
-- `torchtalk_config.json` (auto-created)
-- Environment variables
+Configuration via `torchtalk_config.json` or environment variables:
+- `REPO_PATH`, `MODEL_NAME`, `VLLM_ENDPOINT`
+- `FASTAPI_PORT`, `GRADIO_PORT`, `VLLM_PORT`
+- `MAX_MODEL_LEN`, `TENSOR_PARALLEL_SIZE`
 
-## API Usage
-
-The system provides a REST API at http://localhost:8001 with endpoints for:
-- `/chat` - Process chat requests
-- `/config` - View current configuration
-- `/health` - Health check
-
-## Response Styles
-
-The system adapts its response based on question relevance:
-
-- **PyTorch Expert** (score ≥ 8.0): Detailed technical responses with code examples
-- **PyTorch Aware** (score ≥ 4.0): General ML/DL responses with PyTorch context
-- **Programming Helper** (score ≥ 2.0): General programming assistance
-- **Casual Assistant** (score < 2.0): Conversational responses
+Indexes are stored in `~/.torchtalk/indexes/<repo-hash>/`

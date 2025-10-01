@@ -45,10 +45,7 @@ with gr.Blocks(title="TorchTalk POC") as demo:
             "How does torch.nn.Module work?",
             "Explain PyTorch tensors",
             "What are the main PyTorch optimizers?"
-        ],
-        retry_btn=None,
-        undo_btn=None,
-        clear_btn="Clear Chat"
+        ]
     )
 
 
@@ -64,4 +61,3 @@ if __name__ == "__main__":
         server_port=7860,
         share=True
     )
-

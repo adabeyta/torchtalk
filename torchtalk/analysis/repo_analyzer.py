@@ -548,16 +548,3 @@ class RepoAnalyzer:
         return output_path
 
 
-if __name__ == '__main__':
-    import argparse
-
-    parser = argparse.ArgumentParser(description='Enhanced Repository Analyzer')
-    parser.add_argument('repo_path', help='Path to repository')
-    parser.add_argument('--output', '-o', help='Output file path')
-
-    args = parser.parse_args()
-
-    analyzer = RepoAnalyzer(args.repo_path)
-    output_path = analyzer.save_analysis(args.output)
-
-    print(f"Enhanced analysis complete: {output_path}")

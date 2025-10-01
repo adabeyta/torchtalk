@@ -12,8 +12,8 @@ if requirements_path.exists():
 
 setup(
     name="torchtalk",
-    version="0.1.0",
-    description="Streamlined PyTorch repository analysis and chat system",
+    version="2.0.0",
+    description="Intelligent code assistant for PyTorch codebases with semantic search and multi-language support (Python/C++/CUDA)",
     long_description=long_description,
     long_description_content_type="text/markdown",
     author="Adrian Abeyta",
@@ -24,7 +24,6 @@ setup(
     install_requires=requirements,
     extras_require={
         "web": ["fastapi", "uvicorn", "gradio"],
-        "dev": ["pytest", "black", "flake8", "mypy"],
     },
     entry_points={
         "console_scripts": [

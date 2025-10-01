@@ -1,20 +1,33 @@
-# TorchTalk v1.0 Requirements
-# Core dependencies for PyTorch repository analysis and LLM interaction
-
 # Web Framework
-fastapi==0.104.1
-uvicorn==0.24.0
-pydantic==2.5.0
+fastapi==0.118.0
+uvicorn[standard]==0.34.0
+pydantic==2.11.9
 
 # UI
-gradio==4.7.1
+gradio==5.7.1
 
 # HTTP Client
-requests==2.31.0
+requests==2.32.3
 
 # Code Analysis
-networkx==3.2.1
-tiktoken==0.5.1
+networkx==3.4.2
+tiktoken==0.8.0
 
 # Utilities
-rich==13.7.0
+rich==13.9.4
+
+# Vector Embeddings & RAG Framework
+llama-index-core==0.14.3
+llama-index-embeddings-huggingface==0.6.1
+llama-index-vector-stores-chroma==0.5.3
+
+# Vector Database
+chromadb==1.1.0
+
+# Embeddings & Re-ranking
+sentence-transformers==5.1.1
+transformers>=4.41.0  # Required by sentence-transformers 5.x
+
+# Multi-language Parsing
+tree-sitter==0.21.3
+tree-sitter-languages==1.10.2
