@@ -14,7 +14,7 @@ from typing import List, Dict, Any, Optional, Set, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-import tree_sitter_languages
+import tree_sitter
 
 
 @dataclass
@@ -82,7 +82,8 @@ class BindingDetector:
 
     def __init__(self):
         """Initialize C++ parser for binding detection"""
-        self.parser = tree_sitter_languages.get_parser('cpp')
+        from tree_sitter_language_pack import get_parser
+        self.parser = get_parser('cpp')
         print(" BindingDetector initialized")
 
     def detect_bindings(self, file_path: str, content: str) -> BindingGraph:

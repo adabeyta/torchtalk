@@ -1,6 +1,6 @@
 
-__version__ = "0.1.0"
+__version__ = "2.0.0"
 __author__ = "Adrian Abeyta"
 
-from torchtalk.cli.main import main as cli_main
-__all__ = ["cli_main"]
+# Simplified for v2.0 rewrite
+__all__ = []

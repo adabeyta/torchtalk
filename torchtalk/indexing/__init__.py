@@ -1,10 +1,3 @@
-"""TorchTalk v2.0 indexing pipeline."""
-from torchtalk.indexing.embedder import CodeEmbedder
-from torchtalk.indexing.vector_store import TorchTalkVectorStore
-from torchtalk.indexing.llamaindex_builder import LlamaIndexBuilder
+from torchtalk.indexing.graph_enhanced_indexer import GraphEnhancedIndexer
 
-__all__ = [
-    "CodeEmbedder",
-    "TorchTalkVectorStore",
-    "LlamaIndexBuilder",
-]
+__all__ = ["GraphEnhancedIndexer"]

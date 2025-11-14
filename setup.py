@@ -27,7 +27,7 @@ setup(
     },
     entry_points={
         "console_scripts": [
-            "torchtalk=torchtalk.cli.main:main",
+            "torchtalk=torchtalk.cli:main",
         ],
     },
 )
