@@ -22,6 +22,7 @@ def create_app(
     index_path: str,
     vllm_server: str = "http://localhost:8000",
     model_name: str = "meta-llama/llama-4-maverick",
+    context_window: int = 1000000,
 ) -> gr.Blocks:
     """
     Create Gradio chat interface.
@@ -30,16 +31,18 @@ def create_app(
         index_path: Path to persisted index
         vllm_server: vLLM server URL
         model_name: Model name
+        context_window: Model's max context length
 
     Returns:
         Gradio Blocks app
     """
-    # Initialize engine eagerly
     log.info("Initializing conversation engine...")
     engine = ConversationEngine(
         index_path=index_path,
         vllm_server=vllm_server,
         model_name=model_name,
+        context_window=context_window,
+        served_model_name=model_name,
     )
 
     def chat_fn(message: str, history):
@@ -49,11 +52,24 @@ def create_app(
 
         try:
             reply = engine.chat(message)
-            history = history + [[message, reply]]
+            log.info(f"Chat response type: {type(reply)}, length: {len(str(reply)) if reply else 0}")
+            log.info(f"Chat response preview: {str(reply)[:200] if reply else 'None'}")
+
+            if not reply or str(reply).strip() == "":
+                reply = "Empty Response"
+                log.warning("Received empty response from engine")
+
+            history = history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": str(reply)}
+            ]
             return history
         except Exception as e:
             log.error(f"Chat error: {e}", exc_info=True)
-            history = history + [[message, f"Error: {e}"]]
+            history = history + [
+                {"role": "user", "content": message},
+                {"role": "assistant", "content": f"Error: {e}"}
+            ]
             return history
 
     def reset_fn():
@@ -62,10 +78,10 @@ def create_app(
         return []
 
     # Create Gradio interface
-    with gr.Blocks(title="TorchTalk - PyTorch Codebase Assistant", theme="default") as app:
+    with gr.Blocks(title="TorchTalk - PyTorch Codebase Assistant") as app:
         gr.Markdown(
             """
-            # TorchTalk 🔥
+            # TorchTalk
 
             Ask questions about the PyTorch codebase with cross-language tracing (Python ↔ C++ ↔ CUDA).
 
@@ -79,7 +95,7 @@ def create_app(
         chatbot = gr.Chatbot(
             label="Chat History",
             height=500,
-            show_copy_button=True,
+            buttons=['copy'],
         )
 
         with gr.Row():

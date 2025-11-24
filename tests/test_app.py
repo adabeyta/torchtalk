@@ -1,7 +1,7 @@
 import pytest
 import sys
 from pathlib import Path
-from unittest.mock import Mock, patch, MagicMock
+from unittest.mock import patch
 
 
 def test_app_import():

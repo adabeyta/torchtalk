@@ -1,6 +1,6 @@
 import pytest
 from pathlib import Path
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import patch
 
 
 def test_conversation_engine_import():
@@ -116,6 +116,8 @@ def test_memory_stats():
     with patch('torchtalk.engine.conversation_engine.Vllm'), \
          patch('torchtalk.engine.conversation_engine.load_index_from_storage'), \
          patch('torchtalk.engine.conversation_engine.StorageContext'), \
+         patch('torchtalk.engine.conversation_engine.HuggingFaceEmbedding'), \
+         patch('torchtalk.engine.conversation_engine.Settings'), \
          patch('torchtalk.engine.conversation_engine.Path.exists', return_value=True):
 
         engine = ConversationEngine(

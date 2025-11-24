@@ -47,10 +47,9 @@ class GraphEnhancedIndexer:
             log.info("Running repository analysis (this may take a few minutes)...")
 
             try:
-                self.analysis = self.repo_analyzer.analyze_repository()
+                self.repo_analyzer.analyze_repository()
             except Exception as e:
                 log.warning("Repo analysis failed, continuing with partial features: %s", e)
-                self.analysis = {}
 
             log.info("Detecting cross-language bindings...")
             try:
@@ -80,7 +79,7 @@ class GraphEnhancedIndexer:
                 for n in self.repo_analyzer.call_graph.nodes()
             }
 
-            log.info("✓ Analysis complete:")
+            log.info("Analysis complete:")
             log.info(f"  - Found {sum(len(v) for v in self._bindings_by_file.values())} cross-language bindings")
             log.info(f"  - Built call graph: {self.repo_analyzer.call_graph.number_of_nodes()} nodes")
             log.info(f"  - Built import graph: {self.repo_analyzer.import_graph.number_of_nodes()} nodes")
@@ -89,7 +88,7 @@ class GraphEnhancedIndexer:
 
         # Load documents with injected metadata
         log.info("\n" + "="*60)
-        log.info("PHASE 1: Loading documents")
+        log.info("Loading documents")
         log.info("="*60)
 
         documents = SimpleDirectoryReader(
@@ -104,11 +103,11 @@ class GraphEnhancedIndexer:
             },
         ).load_data()
 
-        log.info(f"✓ Loaded {len(documents)} documents")
+        log.info(f"Loaded {len(documents)} documents")
 
         # Parse into nodes with code-aware splitter
         log.info("\n" + "="*60)
-        log.info("PHASE 2: Parsing into nodes (code-aware)")
+        log.info("Parsing into nodes (code-aware)")
         log.info("="*60)
 
         from tree_sitter_language_pack import get_parser
@@ -145,28 +144,27 @@ class GraphEnhancedIndexer:
                 try:
                     doc_nodes = parser.get_nodes_from_documents([doc])
                     nodes.extend(doc_nodes)
-                except (ValueError, Exception) as e:
+                except (ValueError, Exception):
                     failed += 1
-                    # Skip unparseable files silently
                     continue
 
             if failed > 0:
                 log.info(f"    (skipped {failed} unparseable files)")
 
-        log.info(f"✓ Created {len(nodes)} nodes")
+        log.info(f"Created {len(nodes)} nodes")
 
         # Enhance with graph metadata
         log.info("\n" + "="*60)
-        log.info("PHASE 3: Enhancing with graph metadata")
+        log.info("Enhancing with graph metadata")
         log.info("="*60)
 
         enhanced_nodes = self._enhance_nodes_with_graphs(nodes)
 
-        log.info(f"✓ Enhanced {len(enhanced_nodes)} nodes")
+        log.info(f"Enhanced {len(enhanced_nodes)} nodes")
 
         # Build index (LlamaIndex built-in)
         log.info("\n" + "="*60)
-        log.info("PHASE 4: Building vector index")
+        log.info("Building vector index")
         log.info("="*60)
 
         # Set up HuggingFace embedding model
@@ -188,7 +186,7 @@ class GraphEnhancedIndexer:
         index.storage_context.persist(persist_dir=str(persist_dir))
 
         log.info("\n" + "="*60)
-        log.info("✓ Index built successfully!")
+        log.info("Index built successfully!")
         log.info("="*60)
         log.info(f"Location: {persist_dir}")
         log.info(f"Documents: {len(documents)}")

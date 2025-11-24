@@ -42,9 +42,9 @@ def cmd_index(args):
     log.info(f"Output directory: {output_dir}")
 
     indexer = GraphEnhancedIndexer(repo_path=str(repo_path))
-    index = indexer.build_index(persist_dir=str(output_dir))
+    indexer.build_index(persist_dir=str(output_dir))
 
-    log.info(f"✓ Index built successfully at {output_dir}")
+    log.info(f"Index built successfully at {output_dir}")
     return 0
 
 
@@ -72,40 +72,39 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
         response = requests.get(f"{vllm_url}/health", timeout=2)
         if response.status_code == 200:
             vllm_running = True
-            log.info(f"✓ vLLM server already running at {vllm_url}")
-    except:
+            log.info(f"vLLM server already running at {vllm_url}")
+    except Exception:
         pass
 
     if vllm_running:
-        model_name = os.getenv("MODEL_NAME", "meta-llama/llama-4-maverick")
-        return vllm_url, None, model_name
+        return vllm_url, None, args.model
 
-    # Start vLLM server
     log.info("Starting vLLM server...")
     log.info("This may take 1-3 minutes for model loading and compilation...")
 
-    # Get vLLM config from args or env
-    model_name = args.model or os.getenv("MODEL_NAME", "meta-llama/llama-4-maverick")
-    max_len = os.getenv("MAX_MODEL_LEN", "1000000")
-    gpu_util = os.getenv("GPU_MEMORY_UTIL", "0.9")
-    served_name = os.getenv("SERVED_MODEL_NAME", "torchtalk-maverick")
-    tp_size = str(args.tp) if hasattr(args, 'tp') and args.tp else os.getenv("TENSOR_PARALLEL_SIZE", "1")
+    vllm_cmd = [
+        sys.executable, str(VLLM_LAUNCHER),
+        "--model", args.model,
+        "--max-len", str(args.max_len),
+        "--host", args.host,
+        "--gpu-util", str(args.gpu_util),
+        "--tp", str(args.tp),
+        "--cuda-devices", args.cuda_devices,
+    ]
 
-    vllm_cmd = [sys.executable, str(VLLM_LAUNCHER)]
+    if args.attention_backend:
+        vllm_cmd.extend(["--attention-backend", args.attention_backend])
+    if args.served_model_name:
+        vllm_cmd.extend(["--served-model-name", args.served_model_name])
+    if args.vllm_log_level:
+        vllm_cmd.extend(["--vllm-log-level", args.vllm_log_level])
 
-    # Set environment for subprocess
     env = os.environ.copy()
-    env["MODEL_NAME"] = model_name
-    env["MAX_MODEL_LEN"] = max_len
-    env["GPU_MEMORY_UTIL"] = gpu_util
-    env["SERVED_MODEL_NAME"] = served_name
-    env["TENSOR_PARALLEL_SIZE"] = tp_size
 
-    # Match child port to --vllm-server if it's localhost
     parsed = urlparse(vllm_url)
     port_from_url = parsed.port or (80 if parsed.scheme == "http" else 443)
     if parsed.hostname in ("127.0.0.1", "localhost"):
-        env["PORT"] = str(port_from_url)
+        vllm_cmd.extend(["--port", str(port_from_url)])
 
     try:
         vllm_process = subprocess.Popen(
@@ -158,9 +157,9 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
             try:
                 response = requests.get(f"{vllm_url}/health", timeout=1)
                 if response.status_code == 200:
-                    log.info("✓ vLLM server ready")
+                    log.info("vLLM server ready")
                     break
-            except:
+            except Exception:
                 pass
             time.sleep(step)
             waited += step
@@ -172,7 +171,7 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
                 vllm_process.terminate()
             sys.exit(1)
 
-        return vllm_url, vllm_process, model_name
+        return vllm_url, vllm_process, args.model
 
     except Exception as e:
         log.error(f"Failed to start vLLM server: {e}")
@@ -192,7 +191,6 @@ def cmd_chat(args):
         log.error("Build index first: torchtalk index <repo_path>")
         sys.exit(1)
 
-    # Start or attach to vLLM
     vllm_url, vllm_process, model_name = _start_or_attach_vllm(args.vllm_server, args)
 
     # Share link warning
@@ -213,6 +211,7 @@ def cmd_chat(args):
         index_path=str(index_path),
         vllm_server=vllm_url,
         model_name=model_name,
+        context_window=args.max_len,
     )
 
     # Launch with prevent_thread_lock to get server handle
@@ -238,7 +237,7 @@ def cmd_chat(args):
 
     # Print stable, logged URLs
     log.info(f"\n{'='*60}")
-    log.info("🔥 TorchTalk is ready!")
+    log.info("TorchTalk is ready!")
     log.info(f"{'='*60}")
     log.info(f"Chat UI (local): {local_url or f'http://localhost:{args.port}'}")
     if args.share and share_url:
@@ -264,25 +263,26 @@ def cmd_chat(args):
 
 def cmd_serve_vllm(args):
     """Start vLLM server only"""
-    # Build command
-    cmd = [sys.executable, str(VLLM_LAUNCHER)]
+    cmd = [
+        sys.executable, str(VLLM_LAUNCHER),
+        "--model", args.model,
+        "--max-len", str(args.max_len),
+        "--port", str(args.port),
+        "--host", args.host,
+        "--gpu-util", str(args.gpu_util),
+        "--tp", str(args.tp),
+        "--cuda-devices", args.cuda_devices,
+    ]
 
-    # Set environment
-    env = os.environ.copy()
-    if args.model:
-        env["MODEL_NAME"] = args.model
-    if args.max_len:
-        env["MAX_MODEL_LEN"] = str(args.max_len)
-    if args.port:
-        env["PORT"] = str(args.port)
-    if args.gpu_util:
-        env["GPU_MEMORY_UTIL"] = str(args.gpu_util)
-    if args.tp:
-        env["TENSOR_PARALLEL_SIZE"] = str(args.tp)
+    if args.attention_backend:
+        cmd.extend(["--attention-backend", args.attention_backend])
+    if args.served_model_name:
+        cmd.extend(["--served-model-name", args.served_model_name])
+    if args.vllm_log_level:
+        cmd.extend(["--vllm-log-level", args.vllm_log_level])
 
-    # Run
     log.info("Starting vLLM server...")
-    result = subprocess.run(cmd, env=env)
+    result = subprocess.run(cmd, env=os.environ.copy())
     return result.returncode
 
 
@@ -301,23 +301,33 @@ def main():
     parser_index.add_argument("--output", "-o", help="Output directory (default: ./index)")
     parser_index.set_defaults(func=cmd_index)
 
-    # Chat command
     parser_chat = subparsers.add_parser("chat", help="Start chat interface")
     parser_chat.add_argument("--index", "-i", help="Index path (default: ./index)")
     parser_chat.add_argument("--vllm-server", default="http://localhost:8000", help="vLLM server URL")
-    parser_chat.add_argument("--model", help="Model to serve if launching vLLM")
-    parser_chat.add_argument("--tp", type=int, help="Tensor parallel size (number of GPUs)")
-    parser_chat.add_argument("--port", type=int, default=7860, help="Gradio port (default: 7860)")
+    parser_chat.add_argument("--model", default="meta-llama/llama-4-maverick", help="Model to serve")
+    parser_chat.add_argument("--max-len", type=int, default=1000000, help="Max context length")
+    parser_chat.add_argument("--host", default="0.0.0.0", help="vLLM server host")
+    parser_chat.add_argument("--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)")
+    parser_chat.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
+    parser_chat.add_argument("--cuda-devices", default="0", help="CUDA visible devices")
+    parser_chat.add_argument("--attention-backend", default="", help="Attention backend")
+    parser_chat.add_argument("--served-model-name", default="", help="Served model name")
+    parser_chat.add_argument("--vllm-log-level", default="", help="vLLM log level")
+    parser_chat.add_argument("--port", type=int, default=7860, help="Gradio port")
     parser_chat.add_argument("--share", action="store_true", help="Create public share link")
     parser_chat.set_defaults(func=cmd_chat)
 
-    # Serve vLLM command
     parser_vllm = subparsers.add_parser("serve-vllm", help="Start vLLM server only")
-    parser_vllm.add_argument("--model", help="Model name")
-    parser_vllm.add_argument("--max-len", type=int, help="Max context length")
-    parser_vllm.add_argument("--port", type=int, help="Port (default: 8000)")
-    parser_vllm.add_argument("--gpu-util", type=float, help="GPU memory utilization 0-1")
-    parser_vllm.add_argument("--tp", type=int, help="Tensor parallel size (number of GPUs)")
+    parser_vllm.add_argument("--model", default="meta-llama/llama-4-maverick", help="Model name")
+    parser_vllm.add_argument("--max-len", type=int, default=1000000, help="Max context length")
+    parser_vllm.add_argument("--port", type=int, default=8000, help="Server port")
+    parser_vllm.add_argument("--host", default="0.0.0.0", help="Server host")
+    parser_vllm.add_argument("--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)")
+    parser_vllm.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
+    parser_vllm.add_argument("--cuda-devices", default="0", help="CUDA visible devices")
+    parser_vllm.add_argument("--attention-backend", default="", help="Attention backend")
+    parser_vllm.add_argument("--served-model-name", default="", help="Served model name")
+    parser_vllm.add_argument("--vllm-log-level", default="", help="vLLM log level")
     parser_vllm.set_defaults(func=cmd_serve_vllm)
 
     args = parser.parse_args()

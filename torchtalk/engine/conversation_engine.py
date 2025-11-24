@@ -21,7 +21,7 @@ log = logging.getLogger(__name__)
 
 class ConversationEngine:
     """
-    Conversation engine with graph-enhanced RAG and automatic follow-up handling.
+    Conversation engine with graph-enhanced retrieval and automatic follow-up handling.
 
     Uses LlamaIndex's CondensePlusContextChatEngine for:
     - Automatic conversation memory (ChatMemoryBuffer)
@@ -34,14 +34,12 @@ class ConversationEngine:
         index_path: str,
         vllm_server: str = "http://localhost:8000",
         model_name: str = "meta-llama/llama-4-maverick",
+        context_window: int = 1000000,
         memory_token_limit: int = 3000,
         similarity_top_k: int = 40,
         system_prompt: Optional[str] = None,
         served_model_name: Optional[str] = None,
-        # Retrieval config
-        use_postprocessing: bool = True,
-        use_router: bool = False,
-        rerank_top_n: int = 10,
+        rerank_top_n: Optional[int] = None,
         similarity_cutoff: float = 0.5,
         rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
     ):
@@ -52,13 +50,12 @@ class ConversationEngine:
             index_path: Path to persisted LlamaIndex storage
             vllm_server: vLLM server URL
             model_name: Model name for vLLM
+            context_window: Model's max context length (default: 1000000)
             memory_token_limit: Max tokens to keep in conversation memory
             similarity_top_k: Initial retrieval count (default: 40)
             system_prompt: Optional system prompt for the chat
             served_model_name: Name under which the model is served (defaults to "torchtalk-maverick")
-            use_postprocessing: Enable postprocessing pipeline (default: True)
-            use_router: Enable query routing (location/callstack/general) (default: False)
-            rerank_top_n: Final count after reranking (default: 10)
+            rerank_top_n: Final count after reranking (auto-adjusted based on context_window if None)
             similarity_cutoff: Minimum similarity score threshold (default: 0.5)
             rerank_model: Cross-encoder model for reranking (default: ms-marco-MiniLM-L-6-v2)
         """
@@ -66,24 +63,46 @@ class ConversationEngine:
         self.vllm_server = vllm_server
         self.model_name = model_name
         self.served_model_name = served_model_name or "torchtalk-maverick"
+        self.context_window = context_window
         self.memory_token_limit = memory_token_limit
         self.similarity_top_k = similarity_top_k
-        self.use_postprocessing = use_postprocessing
-        self.use_router = use_router
-        self.rerank_top_n = rerank_top_n
         self.similarity_cutoff = similarity_cutoff
         self.rerank_model = rerank_model
 
+        if rerank_top_n is None:
+            if context_window <= 8192:
+                self.rerank_top_n = 2
+                log.info(f"Small context window ({context_window}), using rerank_top_n=2")
+            elif context_window <= 32768:
+                self.rerank_top_n = 5
+                log.info(f"Medium context window ({context_window}), using rerank_top_n=5")
+            elif context_window <= 131072:
+                self.rerank_top_n = 7
+                log.info(f"Large context window ({context_window}), using rerank_top_n=7")
+            else:
+                self.rerank_top_n = 10
+                log.info(f"Very large context window ({context_window}), using rerank_top_n=10")
+        else:
+            self.rerank_top_n = rerank_top_n
+
         # Default system prompt
         self.system_prompt = system_prompt or (
-            "You are a helpful assistant specialized in PyTorch codebase questions. "
-            "You have access to cross-language binding information (Python ↔ C++ ↔ CUDA) "
-            "and can trace code across different languages. "
-            "Provide detailed, accurate answers with specific file paths and line numbers when relevant."
+            "You are a PyTorch codebase expert assistant. "
+            "You have access to the full PyTorch source code including Python, C++, and CUDA implementations. "
+            "When answering questions:\n"
+            "1. ALWAYS include specific file paths from the retrieved context\n"
+            "2. Include relevant code snippets with line numbers when available\n"
+            "3. Trace cross-language calls: Python → C++ → CUDA when applicable\n"
+            "4. Reference the actual source files, not just general descriptions\n"
+            "Base your answers on the retrieved code context provided to you."
         )
 
         # Initialize LLM with vLLM endpoint
         log.info(f"Connecting to vLLM server at {vllm_server}...")
+
+        # Set context window for LlamaIndex
+        Settings.context_window = context_window
+
         self.llm = Vllm(
             model=model_name,
             temperature=0.1,
@@ -103,7 +122,7 @@ class ConversationEngine:
         log.info("Initializing chat engine with conversation memory...")
         self.chat_engine = self._create_chat_engine()
 
-        log.info("✓ Conversation engine ready")
+        log.info("Conversation engine ready")
 
     def _patch_vllm_api_mode(self):
         """
@@ -148,7 +167,7 @@ class ConversationEngine:
 
         # Monkey patch at the class level to work with Pydantic
         Vllm.complete = patched_complete
-        log.info("✓ Patched Vllm for API mode support")
+        log.info("Patched Vllm for API mode support")
 
     def _load_index(self) -> VectorStoreIndex:
         """Load persisted index with progress indicator"""
@@ -162,7 +181,7 @@ class ConversationEngine:
             TaskProgressColumn(),
         ) as progress:
             # Step 1: Initialize embedding model
-            task1 = progress.add_task("🔥📱 Loading embedding model", total=100)
+            task1 = progress.add_task("Loading embedding model", total=100)
 
             embed_model = HuggingFaceEmbedding(
                 model_name="BAAI/bge-small-en-v1.5"
@@ -171,7 +190,7 @@ class ConversationEngine:
             progress.update(task1, completed=100)
 
             # Step 2: Load storage context
-            task2 = progress.add_task("🔥📱 Loading storage context", total=100)
+            task2 = progress.add_task("Loading storage context", total=100)
 
             storage_context = StorageContext.from_defaults(
                 persist_dir=str(self.index_path)
@@ -179,7 +198,7 @@ class ConversationEngine:
             progress.update(task2, completed=100)
 
             # Step 3: Load index from storage
-            task3 = progress.add_task("🔥📱 Loading vector index", total=100)
+            task3 = progress.add_task("Loading vector index", total=100)
 
             index = load_index_from_storage(storage_context)
             progress.update(task3, completed=100)
@@ -188,40 +207,30 @@ class ConversationEngine:
 
     def _create_chat_engine(self) -> CondensePlusContextChatEngine:
         """Create chat engine with memory"""
+        from torchtalk.engine.postprocessed_retriever import PostprocessedRetriever
+
         # Create memory buffer
         memory = ChatMemoryBuffer.from_defaults(
             token_limit=self.memory_token_limit,
         )
 
-        # Choose engine based on router flag
-        if self.use_router:
-            from torchtalk.engine.router_engine import create_router_engine
+        retriever = PostprocessedRetriever(
+            index=self.index,
+            similarity_top_k=self.similarity_top_k,
+            rerank_top_n=self.rerank_top_n,
+            similarity_cutoff=self.similarity_cutoff,
+            rerank_model=self.rerank_model,
+        )
 
-            log.info("Using router engine (location/callstack/general)")
-            query_engine = create_router_engine(index=self.index, llm=self.llm)
+        chat_engine = CondensePlusContextChatEngine.from_defaults(
+            retriever=retriever,
+            llm=self.llm,
+            memory=memory,
+            system_prompt=self.system_prompt,
+            verbose=True,
+        )
 
-            # Router doesn't use CondensePlusContextChatEngine, wrap with memory
-            # For now, use router directly (Phase 2 PoC)
-            return query_engine  # type: ignore
-        else:
-            from torchtalk.engine.postprocessed_retriever import PostprocessedRetriever
-
-            retriever = PostprocessedRetriever(
-                index=self.index,
-                similarity_top_k=self.similarity_top_k,
-                rerank_top_n=self.rerank_top_n,
-                similarity_cutoff=self.similarity_cutoff,
-            )
-
-            chat_engine = CondensePlusContextChatEngine.from_defaults(
-                retriever=retriever,
-                llm=self.llm,
-                memory=memory,
-                system_prompt=self.system_prompt,
-                verbose=True,
-            )
-
-            return chat_engine
+        return chat_engine
 
     def chat(self, message: str) -> str:
         """
@@ -240,11 +249,18 @@ class ConversationEngine:
             Assistant response
         """
         response = self.chat_engine.chat(message)
+        log.info(f"LlamaIndex response object type: {type(response)}")
+        log.info(f"LlamaIndex response has 'response' attr: {hasattr(response, 'response')}")
+
         # Extract the actual response text from the response object for LlamaIndex
         if hasattr(response, 'response'):
-            return response.response
+            response_text = response.response
+            log.info(f"Extracted response.response: '{response_text}' (length: {len(str(response_text))})")
+            return response_text
         else:
-            return str(response)
+            response_text = str(response)
+            log.info(f"Converted to str: '{response_text}' (length: {len(response_text)})")
+            return response_text
 
     def reset(self):
         """Reset conversation memory"""

@@ -11,9 +11,12 @@ LlamaIndex node metadata. They are NOT persisted in the index itself.
 """
 
 import ast
+import logging
 from pathlib import Path
 from typing import List, Optional
 import networkx as nx
+
+log = logging.getLogger(__name__)
 
 
 class RepoAnalyzer:
@@ -21,7 +24,7 @@ class RepoAnalyzer:
     Builds import and call graphs for a Python repository.
 
     This is a lightweight analyzer focused on relationships needed for
-    graph-enhanced RAG. For the POC, we only extract:
+    graph-enhanced retrieval. For the POC, we only extract:
     - import_graph: module → imported modules
     - call_graph: function → called functions
 
@@ -42,20 +45,20 @@ class RepoAnalyzer:
             dict: Empty dict for backward compatibility. The graphs themselves
                   (self.import_graph, self.call_graph) are what get used.
         """
-        print("Repository analysis starting...")
+        log.info("Repository analysis starting...")
 
         # Find Python files
         python_files = self._find_python_files()
-        print(f"Found {len(python_files)} Python files")
+        log.info(f"Found {len(python_files)} Python files")
 
         # Build graphs
         for file_path in python_files:
             self._analyze_file(file_path)
 
-        print(f"Import graph: {self.import_graph.number_of_nodes()} nodes, "
-              f"{self.import_graph.number_of_edges()} edges")
-        print(f"Call graph: {self.call_graph.number_of_nodes()} nodes, "
-              f"{self.call_graph.number_of_edges()} edges")
+        log.info(f"Import graph: {self.import_graph.number_of_nodes()} nodes, "
+                 f"{self.import_graph.number_of_edges()} edges")
+        log.info(f"Call graph: {self.call_graph.number_of_nodes()} nodes, "
+                 f"{self.call_graph.number_of_edges()} edges")
 
         # Return empty dict for backward compatibility
         # (graph_enhanced_indexer.py stores this but never uses it)
@@ -105,8 +108,7 @@ class RepoAnalyzer:
             # Extract function calls (simple extraction)
             self._extract_calls(tree, relative_path)
 
-        except Exception as e:
-            # Silently skip unparseable files
+        except Exception:
             pass
 
     def _extract_imports(self, tree: ast.AST) -> List[str]:

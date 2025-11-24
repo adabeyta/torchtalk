@@ -10,11 +10,13 @@ Parses pybind11 binding code to build a mapping between:
 This enables cross-language code tracing for PyTorch-style codebases.
 """
 
-from typing import List, Dict, Any, Optional, Set, Tuple
+import logging
+from typing import List, Any, Tuple
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
-import tree_sitter
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -25,46 +27,16 @@ class Binding:
     binding_type: str         # 'function', 'class', 'method', 'module'
     file_path: str            # Path to binding file
     line_number: int          # Line where binding is defined
-    module_name: Optional[str] = None  # PYBIND11_MODULE name
-    parent_class: Optional[str] = None # For methods: parent class
-    signature: Optional[str] = None    # Full binding signature
 
 
 @dataclass
 class BindingGraph:
     """Cross-language binding relationships"""
     bindings: List[Binding] = field(default_factory=list)
-    python_to_cpp: Dict[str, List[str]] = field(default_factory=dict)  # Python name → C++ names
-    cpp_to_python: Dict[str, List[str]] = field(default_factory=dict)  # C++ name → Python names
-    modules: Dict[str, List[Binding]] = field(default_factory=dict)    # Module → bindings
 
     def add_binding(self, binding: Binding):
-        """Add a binding and update indices"""
+        """Add a binding to the list"""
         self.bindings.append(binding)
-
-        # Index by Python name
-        if binding.python_name not in self.python_to_cpp:
-            self.python_to_cpp[binding.python_name] = []
-        self.python_to_cpp[binding.python_name].append(binding.cpp_name)
-
-        # Index by C++ name
-        if binding.cpp_name not in self.cpp_to_python:
-            self.cpp_to_python[binding.cpp_name] = []
-        self.cpp_to_python[binding.cpp_name].append(binding.python_name)
-
-        # Index by module
-        if binding.module_name:
-            if binding.module_name not in self.modules:
-                self.modules[binding.module_name] = []
-            self.modules[binding.module_name].append(binding)
-
-    def get_cpp_for_python(self, python_name: str) -> List[str]:
-        """Get C++ implementations for a Python name"""
-        return self.python_to_cpp.get(python_name, [])
-
-    def get_python_for_cpp(self, cpp_name: str) -> List[str]:
-        """Get Python names for a C++ implementation"""
-        return self.cpp_to_python.get(cpp_name, [])
 
 
 class BindingDetector:
@@ -84,7 +56,7 @@ class BindingDetector:
         """Initialize C++ parser for binding detection"""
         from tree_sitter_language_pack import get_parser
         self.parser = get_parser('cpp')
-        print(" BindingDetector initialized")
+        log.info("BindingDetector initialized")
 
     def detect_bindings(self, file_path: str, content: str) -> BindingGraph:
         """
@@ -195,8 +167,6 @@ class BindingDetector:
                 binding_type='function',
                 file_path=file_path,
                 line_number=line_number,
-                module_name=module_name,
-                signature=match.group(0)
             )
 
             graph.add_binding(binding)
@@ -229,8 +199,6 @@ class BindingDetector:
                 binding_type='class',
                 file_path=file_path,
                 line_number=line_number,
-                module_name=module_name,
-                signature=match.group(0)
             )
 
             graph.add_binding(binding)
@@ -285,9 +253,6 @@ class BindingDetector:
                 binding_type='method',
                 file_path=file_path,
                 line_number=line_number,
-                module_name=module_name,
-                parent_class=cpp_class,
-                signature=match.group(0)
             )
 
             graph.add_binding(binding)
@@ -312,7 +277,7 @@ class BindingDetector:
         # Find all .cpp files
         binding_files = list(dir_path.rglob("*.cpp"))
 
-        print(f"\n🔍 Scanning {len(binding_files)} C++ files for bindings...")
+        log.info(f"Scanning {len(binding_files)} C++ files for bindings...")
 
         for cpp_file in binding_files:
             try:
@@ -325,14 +290,14 @@ class BindingDetector:
                 file_graph = self.detect_bindings(str(cpp_file), content)
 
                 if file_graph.bindings:
-                    print(f"   {cpp_file.name}: {len(file_graph.bindings)} bindings")
+                    log.info(f"   {cpp_file.name}: {len(file_graph.bindings)} bindings")
 
                     # Merge into combined graph
                     for binding in file_graph.bindings:
                         combined_graph.add_binding(binding)
 
             except Exception as e:
-                print(f"   Error parsing {cpp_file.name}: {e}")
+                log.warning(f"   Error parsing {cpp_file.name}: {e}")
 
         return combined_graph
 

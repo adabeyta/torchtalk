@@ -36,15 +36,13 @@ class PostprocessedRetriever(BaseRetriever):
         rerank_top_n: int = 10,
         similarity_cutoff: float = 0.5,
         rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
-        use_metadata_filter: bool = False,
     ):
         self.retriever = VectorIndexRetriever(index=index, similarity_top_k=similarity_top_k)
         self.reranker = SentenceTransformerRerank(model=rerank_model, top_n=rerank_top_n)
         self.similarity_filter = SimilarityPostprocessor(similarity_cutoff=similarity_cutoff)
         self.reorderer = LongContextReorder()
-        self.use_metadata_filter = use_metadata_filter
 
-        log.info(f"PostprocessedRetriever: retrieve={similarity_top_k} → rerank={rerank_top_n} (metadata_filter={use_metadata_filter})")
+        log.info(f"PostprocessedRetriever: retrieve={similarity_top_k} → rerank={rerank_top_n}")
 
     def _retrieve(self, query_bundle: QueryBundle) -> List[NodeWithScore]:
         """Retrieve and postprocess nodes through the pipeline."""
@@ -58,13 +56,17 @@ class PostprocessedRetriever(BaseRetriever):
         nodes = self.similarity_filter.postprocess_nodes(nodes, query_str=query_str)
 
         if not nodes:
-            log.debug("No nodes above similarity cutoff; returning empty result")
-            return []
-
-        # Optional metadata filtering (Phase 3)
-        if self.use_metadata_filter:
-            from torchtalk.engine.metadata_filters import filter_by_metadata
-            nodes = filter_by_metadata(nodes, query_str)
+            log.info("No relevant code context found - returning fallback node")
+            # Create a fallback node so LLM can respond naturally
+            from llama_index.core.schema import TextNode
+            fallback_node = TextNode(
+                text="No relevant PyTorch code was found for this query. "
+                     "Respond naturally as a helpful PyTorch assistant. "
+                     "If the user is greeting you or asking off-topic questions, "
+                     "respond politely and offer to help with PyTorch codebase questions.",
+                metadata={"file_path": "system", "is_fallback": True}
+            )
+            return [NodeWithScore(node=fallback_node, score=1.0)]
 
         nodes = self.reorderer.postprocess_nodes(nodes, query_str=query_str)
         return nodes
