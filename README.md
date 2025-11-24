@@ -147,19 +147,6 @@ torchtalk/
 └── tests/                      # Unit and integration tests
 ```
 
-## Troubleshooting
-
-### "Index not found"
-Build the index first: `torchtalk index /path/to/repo --output ./index`
-
-### "vLLM server not responding"
-1. Check server is running: `curl http://localhost:8000/health`
-2. Verify model loaded: `curl http://localhost:8000/v1/models`
-3. Check logs for OOM errors (reduce `--gpu-util`)
-
-### "Port already in use"
-The launcher checks this automatically. If using vLLM directly, change the port or kill the existing process.
-
 ## Credits
 
 Built with:
