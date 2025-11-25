@@ -1,17 +1,16 @@
 #!/usr/bin/env python3
 """
-Binding detector for pybind11 C++/Python connections.
+Binding detector for Python↔C++ connections.
 
-Parses pybind11 binding code to build a mapping between:
-- Python function names → C++ function implementations
-- Python class names → C++ class implementations
-- Python methods → C++ method implementations
+Detects bindings from two sources:
+1. pybind11 binding code (m.def, py::class_, etc.)
+2. PyTorch's native_functions.yaml (ATen dispatch system)
 
 This enables cross-language code tracing for PyTorch-style codebases.
 """
 
 import logging
-from typing import List, Any, Tuple
+from typing import List, Any, Tuple, Dict, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -263,7 +262,7 @@ class BindingDetector:
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
         """
-        Recursively scan a directory for pybind11 bindings.
+        Recursively scan a directory for pybind11 bindings AND native_functions.yaml.
 
         Args:
             directory: Root directory to scan
@@ -274,10 +273,19 @@ class BindingDetector:
         dir_path = Path(directory)
         combined_graph = BindingGraph()
 
-        # Find all .cpp files
+        # 1. Parse native_functions.yaml (PyTorch's ATen dispatch system)
+        native_funcs_path = dir_path / "aten/src/ATen/native/native_functions.yaml"
+        if native_funcs_path.exists():
+            log.info(f"Parsing native_functions.yaml...")
+            native_bindings = self._parse_native_functions(native_funcs_path)
+            for binding in native_bindings:
+                combined_graph.add_binding(binding)
+            log.info(f"   Found {len(native_bindings)} native function dispatch bindings")
+
+        # 2. Find pybind11 bindings in .cpp files
         binding_files = list(dir_path.rglob("*.cpp"))
 
-        log.info(f"Scanning {len(binding_files)} C++ files for bindings...")
+        log.info(f"Scanning {len(binding_files)} C++ files for pybind11 bindings...")
 
         for cpp_file in binding_files:
             try:
@@ -300,5 +308,59 @@ class BindingDetector:
                 log.warning(f"   Error parsing {cpp_file.name}: {e}")
 
         return combined_graph
+
+    def _parse_native_functions(self, yaml_path: Path) -> List[Binding]:
+        """
+        Parse PyTorch's native_functions.yaml to extract dispatch mappings.
+
+        This file defines ALL native PyTorch ops and their backend implementations.
+        Format:
+            - func: op_name(args) -> return
+              dispatch:
+                CUDA: impl_name_cuda
+                CPU: impl_name_cpu
+        """
+        try:
+            import yaml
+        except ImportError:
+            log.warning("PyYAML not installed, skipping native_functions.yaml")
+            return []
+
+        bindings = []
+
+        try:
+            with open(yaml_path, 'r') as f:
+                data = yaml.safe_load(f)
+
+            if not isinstance(data, list):
+                return []
+
+            for entry in data:
+                if not isinstance(entry, dict) or 'func' not in entry:
+                    continue
+
+                func_sig = entry.get('func', '')
+                # Extract function name: "name(args) -> ret" or "name.overload(args)"
+                func_name = func_sig.split('(')[0].strip()
+
+                dispatch = entry.get('dispatch', {})
+                if not dispatch:
+                    continue
+
+                # Create a binding for each backend dispatch
+                for backend, impl_name in dispatch.items():
+                    binding = Binding(
+                        python_name=func_name,
+                        cpp_name=impl_name,
+                        binding_type=f'native_dispatch_{backend.lower()}',
+                        file_path=str(yaml_path),
+                        line_number=0,  # YAML doesn't give line numbers easily
+                    )
+                    bindings.append(binding)
+
+        except Exception as e:
+            log.warning(f"Error parsing native_functions.yaml: {e}")
+
+        return bindings
 
 

@@ -40,9 +40,16 @@ def cmd_index(args):
 
     log.info(f"Building index for {repo_path}")
     log.info(f"Output directory: {output_dir}")
+    if args.property_graph:
+        log.info("Using PropertyGraphIndex with graph traversal (recommended for cross-language tracing)")
+    else:
+        log.info("Using VectorStoreIndex (add --property-graph for graph traversal)")
 
     indexer = GraphEnhancedIndexer(repo_path=str(repo_path))
-    indexer.build_index(persist_dir=str(output_dir))
+    indexer.build_index(
+        persist_dir=str(output_dir),
+        use_property_graph=args.property_graph,
+    )
 
     log.info(f"Index built successfully at {output_dir}")
     return 0
@@ -89,7 +96,6 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
         "--host", args.host,
         "--gpu-util", str(args.gpu_util),
         "--tp", str(args.tp),
-        "--cuda-devices", args.cuda_devices,
     ]
 
     if args.attention_backend:
@@ -271,7 +277,6 @@ def cmd_serve_vllm(args):
         "--host", args.host,
         "--gpu-util", str(args.gpu_util),
         "--tp", str(args.tp),
-        "--cuda-devices", args.cuda_devices,
     ]
 
     if args.attention_backend:
@@ -299,6 +304,11 @@ def main():
     parser_index = subparsers.add_parser("index", help="Build index for a repository")
     parser_index.add_argument("repo_path", help="Path to repository")
     parser_index.add_argument("--output", "-o", help="Output directory (default: ./index)")
+    parser_index.add_argument(
+        "--property-graph", "-g",
+        action="store_true",
+        help="Use PropertyGraphIndex with graph traversal (recommended for cross-language tracing)"
+    )
     parser_index.set_defaults(func=cmd_index)
 
     parser_chat = subparsers.add_parser("chat", help="Start chat interface")
@@ -309,7 +319,6 @@ def main():
     parser_chat.add_argument("--host", default="0.0.0.0", help="vLLM server host")
     parser_chat.add_argument("--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)")
     parser_chat.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
-    parser_chat.add_argument("--cuda-devices", default="0", help="CUDA visible devices")
     parser_chat.add_argument("--attention-backend", default="", help="Attention backend")
     parser_chat.add_argument("--served-model-name", default="", help="Served model name")
     parser_chat.add_argument("--vllm-log-level", default="", help="vLLM log level")
@@ -324,7 +333,6 @@ def main():
     parser_vllm.add_argument("--host", default="0.0.0.0", help="Server host")
     parser_vllm.add_argument("--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)")
     parser_vllm.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
-    parser_vllm.add_argument("--cuda-devices", default="0", help="CUDA visible devices")
     parser_vllm.add_argument("--attention-backend", default="", help="Attention backend")
     parser_vllm.add_argument("--served-model-name", default="", help="Served model name")
     parser_vllm.add_argument("--vllm-log-level", default="", help="vLLM log level")

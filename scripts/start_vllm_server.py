@@ -46,8 +46,6 @@ def main():
                    help="GPU memory utilization (0-1)")
     p.add_argument("--tp", type=int, default=1,
                    help="Tensor parallel size")
-    p.add_argument("--cuda-devices", default="0",
-                   help="CUDA visible devices")
     p.add_argument("--attention-backend", default="",
                    help="Attention backend (FlashInfer/Triton)")
     p.add_argument("--served-model-name", default="",
@@ -83,6 +81,9 @@ def main():
     if subprocess.call(["bash", "-lc", "nvidia-smi >/dev/null 2>&1"]) != 0:
         log.warning("nvidia-smi not found or no GPU visible")
 
+    # Auto-compute CUDA_VISIBLE_DEVICES based on --tp
+    cuda_devices = ",".join(str(i) for i in range(args.tp))
+
     cmd = [
         "vllm", "serve", args.model,
         "--max-model-len", str(args.max_len),
@@ -92,12 +93,15 @@ def main():
         "--tensor-parallel-size", str(args.tp),
         "--port", str(args.port),
         "--host", args.host,
+        # Use vLLM defaults instead of HuggingFace generation config
+        # (prevents model from overriding temperature/top_p with its defaults)
+        "--generation-config", "vllm",
     ]
     if args.served_model_name:
         cmd += ["--served-model-name", args.served_model_name]
 
     env = os.environ.copy()
-    env["CUDA_VISIBLE_DEVICES"] = args.cuda_devices
+    env["CUDA_VISIBLE_DEVICES"] = cuda_devices
     if args.attention_backend:
         env["VLLM_ATTENTION_BACKEND"] = args.attention_backend
     if args.vllm_log_level:
@@ -109,7 +113,7 @@ def main():
     log.info(f"  Port: {args.host}:{args.port}")
     log.info(f"  GPU memory utilization: {args.gpu_util}")
     log.info(f"  Tensor parallel size: {args.tp}")
-    log.info(f"  CUDA devices: {args.cuda_devices}")
+    log.info(f"  CUDA devices: {cuda_devices}")
     if args.attention_backend:
         log.info(f"  Attention backend: {args.attention_backend}")
     if args.served_model_name:
