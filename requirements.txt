@@ -11,10 +11,14 @@ llama-index==0.*
 llama-index-core==0.14.3
 llama-index-embeddings-huggingface==0.6.1
 llama-index-vector-stores-chroma==0.5.3
+llama-index-vector-stores-lancedb==0.*
+llama-index-graph-stores-neo4j==0.*
+llama-index-retrievers-bm25==0.*
 llama-index-llms-vllm==0.*
 
 # Vector Database
 chromadb==1.1.0
+lancedb>=0.4.0
 
 # Embeddings
 sentence-transformers==5.1.1

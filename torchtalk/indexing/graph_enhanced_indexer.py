@@ -156,6 +156,10 @@ class GraphEnhancedIndexer:
         self,
         persist_dir: str,
         use_property_graph: bool = False,
+        use_lancedb: bool = False,
+        neo4j_uri: str = None,
+        neo4j_user: str = None,
+        neo4j_password: str = None,
     ) -> Union[VectorStoreIndex, PropertyGraphIndex]:
         """
         Build LlamaIndex with graph metadata.
@@ -164,6 +168,11 @@ class GraphEnhancedIndexer:
             persist_dir: Directory to persist the index
             use_property_graph: If True, use PropertyGraphIndex with graph traversal.
                                If False (default), use VectorStoreIndex with metadata only.
+            use_lancedb: If True, use LanceDB for vector storage with native hybrid search.
+            neo4j_uri: Neo4j connection URI (e.g., "bolt://localhost:7687"). If provided,
+                      stores property graph in Neo4j for advanced graph queries.
+            neo4j_user: Neo4j username (default: "neo4j")
+            neo4j_password: Neo4j password
 
         Returns:
             VectorStoreIndex or PropertyGraphIndex depending on use_property_graph
@@ -234,7 +243,7 @@ class GraphEnhancedIndexer:
 
         documents = SimpleDirectoryReader(
             str(self.repo_path),
-            required_exts=[".py", ".cpp", ".cc", ".cu", ".cuh", ".h", ".hpp"],
+            required_exts=[".py", ".cpp", ".cc", ".cu", ".cuh", ".h", ".hpp", ".yaml"],
             recursive=True,
             exclude_hidden=True,
             exclude=["test", "tests", "build", "third_party"],
@@ -257,7 +266,8 @@ class GraphEnhancedIndexer:
         lang_map = {
             '.py': 'python',
             '.cpp': 'cpp', '.cc': 'cpp', '.cu': 'cpp',
-            '.cuh': 'cpp', '.h': 'cpp', '.hpp': 'cpp'
+            '.cuh': 'cpp', '.h': 'cpp', '.hpp': 'cpp',
+            '.yaml': 'yaml', '.yml': 'yaml',
         }
 
         # Group documents by language
@@ -269,13 +279,18 @@ class GraphEnhancedIndexer:
                 docs_by_lang.setdefault(lang, []).append(doc)
 
         # Parse each language separately
+        # NOTE: Chunk size of 80 lines (~2000 chars) balances:
+        # - Enough context to understand a function/class
+        # - Small enough to avoid noise in retrieval
+        # - Multiple chunks can be retrieved without overwhelming context
+        # Research suggests 250-1000 tokens optimal for code RAG
         nodes = []
         for lang, docs in docs_by_lang.items():
             log.info(f"  - Parsing {len(docs)} {lang} files")
             parser = CodeSplitter.from_defaults(
                 language=lang,
-                chunk_lines=200,
-                chunk_lines_overlap=20,
+                chunk_lines=80,  # Reduced from 200 for better precision
+                chunk_lines_overlap=15,  # ~20% overlap for context continuity
                 parser=get_parser(lang)
             )
 
@@ -305,22 +320,28 @@ class GraphEnhancedIndexer:
 
         # Build index
         log.info("\n" + "="*60)
+        backend_info = []
         if use_property_graph:
-            log.info("Building PropertyGraphIndex (with graph traversal)")
+            backend_info.append("PropertyGraphIndex")
         else:
-            log.info("Building VectorStoreIndex")
+            backend_info.append("VectorStoreIndex")
+        if use_lancedb:
+            backend_info.append("LanceDB")
+        if neo4j_uri:
+            backend_info.append("Neo4j")
+        log.info(f"Building {' + '.join(backend_info)}")
         log.info("="*60)
 
         # Set up code-specific embedding model with GPU acceleration and large batches
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
-        from llama_index.core import Settings
+        from llama_index.core import Settings, StorageContext
         import torch
 
         # Detect GPU and set optimal batch size
         device = "cuda" if torch.cuda.is_available() else "cpu"
         # Very small batch size to avoid OOM when sharing GPU with vLLM
         # Jina embeddings with 8192 token context creates large attention matrices
-        embed_batch_size = 16 if device == "cuda" else 8
+        embed_batch_size = 4 if device == "cuda" else 2
 
         log.info(f"Embedding device: {device}, batch_size: {embed_batch_size}")
 
@@ -332,6 +353,29 @@ class GraphEnhancedIndexer:
         )
         Settings.embed_model = embed_model
 
+        # Set up vector store (LanceDB or default)
+        vector_store = None
+        if use_lancedb:
+            from llama_index.vector_stores.lancedb import LanceDBVectorStore
+            lancedb_path = persist_dir / "lancedb"
+            log.info(f"Using LanceDB vector store at {lancedb_path}")
+            vector_store = LanceDBVectorStore(
+                uri=str(lancedb_path),
+                mode="overwrite",
+                query_type="hybrid",  # Enable native hybrid search
+            )
+
+        # Set up graph store (Neo4j or default)
+        graph_store = None
+        if neo4j_uri and use_property_graph:
+            from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+            log.info(f"Using Neo4j graph store at {neo4j_uri}")
+            graph_store = Neo4jPropertyGraphStore(
+                username=neo4j_user or "neo4j",
+                password=neo4j_password or "",
+                url=neo4j_uri,
+            )
+
         if use_property_graph:
             # Create binding graph extractor for PropertyGraphIndex
             kg_extractor = BindingGraphExtractor(
@@ -342,39 +386,86 @@ class GraphEnhancedIndexer:
             # First, build a VectorStoreIndex to embed ALL text nodes
             # PropertyGraphIndex only embeds kg_nodes (graph entities), not source text
             log.info(f"Building vector embeddings for {len(enhanced_nodes)} text nodes...")
-            vector_index = VectorStoreIndex(
-                nodes=enhanced_nodes,
-                embed_model=embed_model,
-                show_progress=True,
-                use_async=True,  # Async embedding for better throughput
-            )
+
+            if vector_store:
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                vector_index = VectorStoreIndex(
+                    nodes=enhanced_nodes,
+                    embed_model=embed_model,
+                    storage_context=storage_context,
+                    show_progress=True,
+                    use_async=False,  # Disable async to avoid GPU memory fragmentation
+                )
+            else:
+                vector_index = VectorStoreIndex(
+                    nodes=enhanced_nodes,
+                    embed_model=embed_model,
+                    show_progress=True,
+                    use_async=False,  # Disable async to avoid GPU memory fragmentation
+                )
 
             # Now build PropertyGraphIndex with the same vector store
             # This gives us graph traversal + vector search over actual code
             # We pass embed_kg_nodes=False since text nodes are already embedded above
             log.info("Building property graph with cross-language bindings...")
-            index = PropertyGraphIndex(
-                nodes=enhanced_nodes,
-                kg_extractors=[kg_extractor],
-                embed_model=embed_model,
-                vector_store=vector_index.vector_store,
-                embed_kg_nodes=False,  # Skip re-embedding, text nodes already done
-                show_progress=True,
-            )
 
-            # Use the docstore from vector_index which has all nodes
-            index.storage_context.docstore = vector_index.storage_context.docstore
+            if graph_store:
+                # Use Neo4j for graph storage
+                index = PropertyGraphIndex(
+                    nodes=enhanced_nodes,
+                    kg_extractors=[kg_extractor],
+                    embed_model=embed_model,
+                    property_graph_store=graph_store,
+                    vector_store=vector_index.vector_store,
+                    embed_kg_nodes=False,
+                    show_progress=True,
+                )
+            else:
+                index = PropertyGraphIndex(
+                    nodes=enhanced_nodes,
+                    kg_extractors=[kg_extractor],
+                    embed_model=embed_model,
+                    vector_store=vector_index.vector_store,
+                    embed_kg_nodes=False,
+                    show_progress=True,
+                )
+
+            # Copy docstore from vector_index if it has nodes (non-LanceDB case).
+            # When using LanceDB, the vector_index docstore is empty because LanceDB
+            # handles storage externally. In that case, PropertyGraphIndex already
+            # has the nodes in its own docstore from the constructor.
+            if vector_index.storage_context.docstore.docs:
+                index.storage_context.docstore = vector_index.storage_context.docstore
         else:
-            index = VectorStoreIndex(
-                nodes=enhanced_nodes,
-                show_progress=True
-            )
+            if vector_store:
+                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                index = VectorStoreIndex(
+                    nodes=enhanced_nodes,
+                    storage_context=storage_context,
+                    show_progress=True
+                )
+            else:
+                index = VectorStoreIndex(
+                    nodes=enhanced_nodes,
+                    show_progress=True
+                )
 
         # Persist (LlamaIndex built-in)
+        # Note: Neo4j graph store persists to Neo4j directly, not to disk
         log.info(f"\nPersisting to {persist_dir}...")
         index.storage_context.persist(persist_dir=str(persist_dir))
 
-        # Save index type marker for loading
+        # Save index configuration for loading
+        import json
+        config = {
+            "index_type": "property_graph" if use_property_graph else "vector",
+            "use_lancedb": use_lancedb,
+            "neo4j_uri": neo4j_uri,
+        }
+        config_file = persist_dir / ".index_config.json"
+        config_file.write_text(json.dumps(config, indent=2))
+
+        # Legacy marker for backward compatibility
         index_type_file = persist_dir / ".index_type"
         index_type_file.write_text("property_graph" if use_property_graph else "vector")
 
@@ -383,6 +474,10 @@ class GraphEnhancedIndexer:
         log.info("="*60)
         log.info(f"Location: {persist_dir}")
         log.info(f"Index type: {'PropertyGraphIndex' if use_property_graph else 'VectorStoreIndex'}")
+        if use_lancedb:
+            log.info("Vector store: LanceDB (hybrid search enabled)")
+        if neo4j_uri:
+            log.info(f"Graph store: Neo4j ({neo4j_uri})")
         log.info(f"Documents: {len(documents)}")
         log.info(f"Nodes: {len(enhanced_nodes)}")
         if use_property_graph:
@@ -390,10 +485,53 @@ class GraphEnhancedIndexer:
 
         return index
 
+    def _compute_line_numbers(self, node: TextNode, file_content_cache: Dict[str, str]) -> None:
+        """
+        Compute start_line and end_line from character indices.
+
+        LlamaIndex's CodeSplitter sets start_char_idx and end_char_idx on nodes.
+        We convert these to line numbers for better citations.
+        """
+        start_idx = node.start_char_idx
+        end_idx = node.end_char_idx
+
+        if start_idx is None or end_idx is None:
+            return
+
+        # Get file content (cached)
+        file_path = node.metadata.get("file_path", "")
+        if not file_path:
+            return
+
+        if file_path not in file_content_cache:
+            try:
+                file_content_cache[file_path] = Path(file_path).read_text(encoding='utf-8')
+            except Exception:
+                return
+
+        content = file_content_cache[file_path]
+
+        # Count newlines up to start and end positions
+        start_line = content[:start_idx].count('\n') + 1
+        end_line = content[:end_idx].count('\n') + 1
+
+        node.metadata["start_line"] = start_line
+        node.metadata["end_line"] = end_line
+
     def _enhance_nodes_with_graphs(self, nodes: List[TextNode]) -> List[TextNode]:
-        """Add graph metadata to each node"""
+        """Add graph metadata to each node.
+
+        Note: Complex metadata (lists, dicts) are serialized to JSON strings for
+        LanceDB compatibility which requires flat metadata (str, int, float, None).
+        The postprocessors in postprocessed_retriever.py handle deserialization.
+        """
+        import json
 
         enhanced_count = 0
+        line_number_count = 0
+
+        # Cache file contents for line number computation
+        file_content_cache: Dict[str, str] = {}
 
         for node in nodes:
             # Get canonical relative path
@@ -411,6 +549,11 @@ class GraphEnhancedIndexer:
             # Store canonical path on node
             node.metadata["rel_path"] = rel_path
 
+            # Compute line numbers from character indices (P1: line numbers in index)
+            self._compute_line_numbers(node, file_content_cache)
+            if "start_line" in node.metadata:
+                line_number_count += 1
+
             # Detect language (include .cuh)
             if rel_path.endswith(".py"):
                 lang = "python"
@@ -425,9 +568,10 @@ class GraphEnhancedIndexer:
             node.metadata.setdefault("schema", "tt_graph_meta_v1")
             node.metadata.setdefault("language", lang)
             node.metadata.setdefault("has_bindings", False)
-            node.metadata.setdefault("cross_language_bindings", [])
-            node.metadata.setdefault("function_calls", [])
-            node.metadata.setdefault("imports", [])
+            # Complex metadata serialized to JSON strings for LanceDB compatibility
+            node.metadata.setdefault("cross_language_bindings", "[]")
+            node.metadata.setdefault("function_calls", "[]")
+            node.metadata.setdefault("imports", "[]")
 
             # Add binding information - first try file-based lookup
             bindings = self._get_bindings_for_file(rel_path)
@@ -443,21 +587,25 @@ class GraphEnhancedIndexer:
                         bindings.append(cb)
 
             if bindings:
-                node.metadata["cross_language_bindings"] = bindings
+                # Serialize to JSON for LanceDB compatibility (requires flat metadata)
+                node.metadata["cross_language_bindings"] = json.dumps(bindings)
                 node.metadata["has_bindings"] = True
                 enhanced_count += 1
 
             # Add call graph information
             calls = self._get_calls_in_file(rel_path)
             if calls:
-                node.metadata["function_calls"] = calls
+                # Serialize to JSON for LanceDB compatibility
+                node.metadata["function_calls"] = json.dumps(calls)
 
             # Add import information
             imports = self._get_imports_for_file(rel_path)
             if imports:
-                node.metadata["imports"] = imports
+                # Serialize to JSON for LanceDB compatibility
+                node.metadata["imports"] = json.dumps(imports)
 
         log.info(f"  - Enhanced {enhanced_count} nodes with cross-language bindings")
+        log.info(f"  - Added line numbers to {line_number_count} nodes")
 
         return nodes
 

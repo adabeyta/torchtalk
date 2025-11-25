@@ -45,10 +45,19 @@ def cmd_index(args):
     else:
         log.info("Using VectorStoreIndex (add --property-graph for graph traversal)")
 
+    if args.lancedb:
+        log.info("Using LanceDB vector store (native hybrid search)")
+    if args.neo4j_uri:
+        log.info(f"Using Neo4j graph store at {args.neo4j_uri}")
+
     indexer = GraphEnhancedIndexer(repo_path=str(repo_path))
     indexer.build_index(
         persist_dir=str(output_dir),
         use_property_graph=args.property_graph,
+        use_lancedb=args.lancedb,
+        neo4j_uri=args.neo4j_uri,
+        neo4j_user=args.neo4j_user,
+        neo4j_password=args.neo4j_password,
     )
 
     log.info(f"Index built successfully at {output_dir}")
@@ -308,6 +317,25 @@ def main():
         "--property-graph", "-g",
         action="store_true",
         help="Use PropertyGraphIndex with graph traversal (recommended for cross-language tracing)"
+    )
+    parser_index.add_argument(
+        "--lancedb",
+        action="store_true",
+        help="Use LanceDB for vector storage with native hybrid BM25+vector search"
+    )
+    parser_index.add_argument(
+        "--neo4j-uri",
+        help="Neo4j connection URI (e.g., bolt://localhost:7687) for graph storage"
+    )
+    parser_index.add_argument(
+        "--neo4j-user",
+        default="neo4j",
+        help="Neo4j username (default: neo4j)"
+    )
+    parser_index.add_argument(
+        "--neo4j-password",
+        default="",
+        help="Neo4j password"
     )
     parser_index.set_defaults(func=cmd_index)
 

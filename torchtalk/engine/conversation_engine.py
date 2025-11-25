@@ -109,6 +109,11 @@ class ConversationEngine:
             "• If code for a layer of the implementation is missing, say: 'The [specific layer] was not in the retrieved context.'\n"
             "• You MAY explain concepts and connect ideas using your knowledge, but code must come from context.\n\n"
 
+            "CONTEXT FORMAT:\n"
+            "• Each snippet starts with [FILE: path:lines] showing the source file.\n"
+            "• [CROSS-LANGUAGE BINDINGS: ...] is COMPUTED METADATA showing which operations are linked - this is NOT from the actual file content.\n"
+            "• When citing native_functions.yaml, use the actual YAML format shown in the snippet (func:, dispatch:, etc.), NOT the binding metadata.\n\n"
+
             "PYTORCH IMPLEMENTATION CHAIN (trace as far as context allows):\n"
             "  Python API (torch/, torch/nn/functional) → native_functions.yaml dispatch → ATen native (aten/src/ATen/native/) → Backend kernels (cuda/*.cu, cpu/*.cpp)\n\n"
 
@@ -172,15 +177,80 @@ class ConversationEngine:
         # Store served model name for the patched method
         served_model_name = self.served_model_name
 
+        # Store context window for the patched method
+        context_window = self.context_window
+
         # Create patched complete method
         def patched_complete(llm_self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponse:
             """Patched complete method that uses OpenAI API for vLLM server."""
+            # Estimate input tokens (rough: 1 token ≈ 4 chars for code)
+            estimated_input_tokens = len(prompt) // 3
+
+            # Calculate available tokens for completion
+            requested_max_tokens = kwargs.get("max_tokens", llm_self.max_new_tokens)
+            available_tokens = context_window - estimated_input_tokens - 100  # 100 token safety margin
+
+            # Dynamically adjust max_tokens if we're close to the limit
+            if available_tokens < requested_max_tokens:
+                if available_tokens < 256:
+                    # Not enough room for a meaningful response - smart truncate prompt
+                    log.warning(f"[TokenBudget] Input too long ({estimated_input_tokens} tokens est.), truncating prompt")
+                    # Smart truncation: preserve critical sections (YAML, CUDA, C++)
+                    # Split prompt into sections by file markers
+                    max_prompt_chars = (context_window - 2048 - 100) * 3
+
+                    # Try to preserve critical cross-language files
+                    critical_patterns = ['.yaml', '.cu', '/native/', '/ATen/', '.cpp', '.h']
+                    sections = prompt.split('\n---\n')
+
+                    if len(sections) > 1:
+                        # Separate critical and non-critical sections
+                        critical_sections = []
+                        other_sections = []
+                        for section in sections:
+                            is_critical = any(p in section[:500] for p in critical_patterns)
+                            if is_critical:
+                                critical_sections.append(section)
+                            else:
+                                other_sections.append(section)
+
+                        # Build prompt: prioritize critical sections
+                        result_sections = []
+                        current_len = 0
+
+                        # First add critical sections
+                        for section in critical_sections:
+                            if current_len + len(section) < max_prompt_chars * 0.7:  # Reserve 30% for others
+                                result_sections.append(section)
+                                current_len += len(section)
+
+                        # Then add other sections until full
+                        for section in other_sections:
+                            if current_len + len(section) < max_prompt_chars:
+                                result_sections.append(section)
+                                current_len += len(section)
+
+                        prompt = '\n---\n'.join(result_sections)
+                        log.info(f"[TokenBudget] Smart truncation: kept {len(critical_sections)} critical + {len(result_sections) - len(critical_sections)} other sections")
+                    else:
+                        # Fallback: simple truncation
+                        prompt = prompt[:max_prompt_chars]
+
+                    prompt += "\n\n[Context truncated due to length]"
+                    available_tokens = 2048
+                else:
+                    log.info(f"[TokenBudget] Reducing max_tokens from {requested_max_tokens} to {available_tokens} (input: ~{estimated_input_tokens} tokens)")
+
+                actual_max_tokens = max(256, min(available_tokens, requested_max_tokens))
+            else:
+                actual_max_tokens = requested_max_tokens
+
             # Use OpenAI API to call vLLM server with the served model name
             response = openai_client.chat.completions.create(
                 model=served_model_name,
                 messages=[{"role": "user", "content": prompt}],
                 temperature=kwargs.get("temperature", llm_self.temperature),
-                max_tokens=kwargs.get("max_tokens", llm_self.max_new_tokens),
+                max_tokens=actual_max_tokens,
                 top_p=kwargs.get("top_p", llm_self.top_p),
                 frequency_penalty=kwargs.get("frequency_penalty", llm_self.frequency_penalty),
                 presence_penalty=kwargs.get("presence_penalty", llm_self.presence_penalty),
@@ -193,19 +263,37 @@ class ConversationEngine:
         log.info("Patched Vllm for API mode support")
 
     def _load_index(self):
-        """Load persisted index with progress indicator. Auto-detects index type."""
+        """Load persisted index with progress indicator. Auto-detects index type and backends."""
+        import json
+
         if not self.index_path.exists():
             raise FileNotFoundError(f"Index not found at {self.index_path}")
 
-        # Check for index type marker
+        # Load index configuration
         self.is_property_graph = False
-        try:
-            index_type_file = self.index_path / ".index_type"
-            if index_type_file.exists():
-                index_type = index_type_file.read_text().strip()
-                self.is_property_graph = (index_type == "property_graph")
-        except (OSError, IOError):
-            pass  # File doesn't exist or can't be read - default to VectorStoreIndex
+        self.use_lancedb = False
+        self.neo4j_uri = None
+
+        # Try new config format first
+        config_file = self.index_path / ".index_config.json"
+        if config_file.exists():
+            try:
+                config = json.loads(config_file.read_text())
+                self.is_property_graph = (config.get("index_type") == "property_graph")
+                self.use_lancedb = config.get("use_lancedb", False)
+                self.neo4j_uri = config.get("neo4j_uri")
+            except (json.JSONDecodeError, OSError):
+                pass
+
+        # Fall back to legacy marker
+        if not config_file.exists():
+            try:
+                index_type_file = self.index_path / ".index_type"
+                if index_type_file.exists():
+                    index_type = index_type_file.read_text().strip()
+                    self.is_property_graph = (index_type == "property_graph")
+            except (OSError, IOError):
+                pass
 
         with Progress(
             SpinnerColumn(),
@@ -222,27 +310,79 @@ class ConversationEngine:
             )
             Settings.embed_model = embed_model
             # Disable default LLM to prevent OpenAI API key validation during index loading
-            # PropertyGraphIndex.__init__ accesses Settings.llm for SimpleLLMPathExtractor
             from llama_index.core.llms import MockLLM
             Settings.llm = MockLLM()
             progress.update(task1, completed=100)
 
-            # Step 2: Load storage context
+            # Step 2: Load vector store (LanceDB or default)
             task2 = progress.add_task("Loading storage context", total=100)
 
-            storage_context = StorageContext.from_defaults(
-                persist_dir=str(self.index_path)
-            )
+            vector_store = None
+            if self.use_lancedb:
+                from llama_index.vector_stores.lancedb import LanceDBVectorStore
+                lancedb_path = self.index_path / "lancedb"
+                if lancedb_path.exists():
+                    log.info(f"Loading LanceDB vector store from {lancedb_path}")
+                    vector_store = LanceDBVectorStore(
+                        uri=str(lancedb_path),
+                        mode="read",
+                        query_type="hybrid",
+                    )
+
+            # Load graph store (Neo4j if configured)
+            graph_store = None
+            if self.neo4j_uri and self.is_property_graph:
+                from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+                log.info(f"Connecting to Neo4j at {self.neo4j_uri}")
+                # Note: Neo4j credentials should be passed via environment variables
+                # or stored securely - not in the config file
+                import os
+                graph_store = Neo4jPropertyGraphStore(
+                    username=os.environ.get("NEO4J_USER", "neo4j"),
+                    password=os.environ.get("NEO4J_PASSWORD", ""),
+                    url=self.neo4j_uri,
+                )
+
+            if vector_store:
+                storage_context = StorageContext.from_defaults(
+                    persist_dir=str(self.index_path),
+                    vector_store=vector_store,
+                )
+            else:
+                storage_context = StorageContext.from_defaults(
+                    persist_dir=str(self.index_path)
+                )
             progress.update(task2, completed=100)
 
             # Step 3: Load index from storage
-            index_desc = "PropertyGraphIndex" if self.is_property_graph else "VectorStoreIndex"
+            backends = []
+            if self.is_property_graph:
+                backends.append("PropertyGraphIndex")
+            else:
+                backends.append("VectorStoreIndex")
+            if self.use_lancedb:
+                backends.append("LanceDB")
+            if self.neo4j_uri:
+                backends.append("Neo4j")
+            index_desc = " + ".join(backends)
+
             task3 = progress.add_task(f"Loading {index_desc}", total=100)
 
-            index = load_index_from_storage(storage_context)
+            if graph_store and self.is_property_graph:
+                # Load PropertyGraphIndex with Neo4j
+                index = PropertyGraphIndex.from_existing(
+                    property_graph_store=graph_store,
+                    vector_store=storage_context.vector_stores.get("default"),
+                    embed_model=embed_model,
+                )
+                # Attach docstore for binding expansion
+                index._storage_context = storage_context
+            else:
+                index = load_index_from_storage(storage_context)
+
             progress.update(task3, completed=100)
 
-        log.info(f"Loaded index type: {index_desc}")
+        log.info(f"Loaded index: {index_desc}")
         return index
 
     def _create_chat_engine(self) -> CondensePlusContextChatEngine:
@@ -254,6 +394,22 @@ class ConversationEngine:
             token_limit=self.memory_token_limit,
         )
 
+        # Scale max_final_nodes based on context window
+        # Each code chunk averages ~2500 tokens (80 lines * ~30 tokens/line + metadata)
+        # Reserve ~2K tokens for system prompt, ~2K for response, ~1K for conversation
+        # Available = context_window - 5000
+        # max_final_nodes = available / 2500
+        if self.context_window <= 8192:
+            max_final_nodes = 10
+        elif self.context_window <= 32768:
+            max_final_nodes = 15
+        elif self.context_window <= 65536:
+            max_final_nodes = 25
+        elif self.context_window <= 131072:
+            max_final_nodes = 50
+        else:
+            max_final_nodes = 80
+
         retriever = PostprocessedRetriever(
             index=self.index,
             similarity_top_k=self.similarity_top_k,
@@ -261,6 +417,7 @@ class ConversationEngine:
             similarity_cutoff=self.similarity_cutoff,
             rerank_model=self.rerank_model,
             graph_path_depth=self.graph_path_depth,
+            max_final_nodes=max_final_nodes,
         )
 
         chat_engine = CondensePlusContextChatEngine.from_defaults(
