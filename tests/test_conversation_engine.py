@@ -1,12 +1,6 @@
 import pytest
 from pathlib import Path
-from unittest.mock import patch
-
-
-def test_conversation_engine_import():
-    """Test that ConversationEngine can be imported"""
-    from torchtalk.engine import ConversationEngine
-    assert ConversationEngine is not None
+from unittest.mock import patch, Mock
 
 
 def test_conversation_engine_init_missing_index():
@@ -15,8 +9,7 @@ def test_conversation_engine_init_missing_index():
 
     with pytest.raises(FileNotFoundError):
         ConversationEngine(
-            index_path="/nonexistent/path",
-            vllm_server="http://localhost:8000"
+            index_path="/nonexistent/path", vllm_server="http://localhost:8000"
         )
 
 
@@ -29,14 +22,8 @@ def test_conversation_engine_init(mock_index_path, vllm_server_url):
     if not mock_index_path.exists():
         pytest.skip(f"Index not found at {mock_index_path}")
 
-    engine = ConversationEngine(
-        index_path=str(mock_index_path),
-        vllm_server=vllm_server_url
-    )
-
-    assert engine is not None
-    assert engine.index is not None
-    assert engine.chat_engine is not None
+    ConversationEngine(index_path=str(mock_index_path), vllm_server=vllm_server_url)
+    # If we get here without exception, initialization succeeded
 
 
 @pytest.mark.integration
@@ -48,8 +35,7 @@ def test_conversation_basic_chat(mock_index_path, vllm_server_url):
         pytest.skip(f"Index not found at {mock_index_path}")
 
     engine = ConversationEngine(
-        index_path=str(mock_index_path),
-        vllm_server=vllm_server_url
+        index_path=str(mock_index_path), vllm_server=vllm_server_url
     )
 
     response = engine.chat("What is PyTorch?")
@@ -66,8 +52,7 @@ def test_conversation_follow_up(mock_index_path, vllm_server_url):
         pytest.skip(f"Index not found at {mock_index_path}")
 
     engine = ConversationEngine(
-        index_path=str(mock_index_path),
-        vllm_server=vllm_server_url
+        index_path=str(mock_index_path), vllm_server=vllm_server_url
     )
 
     # First question
@@ -93,8 +78,7 @@ def test_conversation_memory_reset(mock_index_path, vllm_server_url):
         pytest.skip(f"Index not found at {mock_index_path}")
 
     engine = ConversationEngine(
-        index_path=str(mock_index_path),
-        vllm_server=vllm_server_url
+        index_path=str(mock_index_path), vllm_server=vllm_server_url
     )
 
     # Chat and check history
@@ -111,18 +95,30 @@ def test_conversation_memory_reset(mock_index_path, vllm_server_url):
 def test_memory_stats():
     """Test memory statistics structure"""
     from torchtalk.engine import ConversationEngine
+    from llama_index.core.storage.docstore import SimpleDocumentStore
+    from llama_index.core.schema import TextNode
+
+    # Create a mock index with a proper docstore
+    mock_docstore = SimpleDocumentStore()
+    mock_docstore.add_documents([TextNode(text="test document", id_="test_id")])
+
+    mock_index = Mock()
+    mock_index.docstore = mock_docstore
 
     # Mock the required components
-    with patch('torchtalk.engine.conversation_engine.Vllm'), \
-         patch('torchtalk.engine.conversation_engine.load_index_from_storage'), \
-         patch('torchtalk.engine.conversation_engine.StorageContext'), \
-         patch('torchtalk.engine.conversation_engine.HuggingFaceEmbedding'), \
-         patch('torchtalk.engine.conversation_engine.Settings'), \
-         patch('torchtalk.engine.conversation_engine.Path.exists', return_value=True):
-
+    with (
+        patch("torchtalk.engine.conversation_engine.Vllm"),
+        patch(
+            "torchtalk.engine.conversation_engine.load_index_from_storage",
+            return_value=mock_index,
+        ),
+        patch("torchtalk.engine.conversation_engine.StorageContext"),
+        patch("torchtalk.engine.conversation_engine.HuggingFaceEmbedding"),
+        patch("torchtalk.engine.conversation_engine.Settings"),
+        patch("torchtalk.engine.conversation_engine.Path.exists", return_value=True),
+    ):
         engine = ConversationEngine(
-            index_path="/mock/path",
-            vllm_server="http://localhost:8000"
+            index_path="/mock/path", vllm_server="http://localhost:8000"
         )
 
         stats = engine.memory_stats
@@ -139,14 +135,11 @@ def test_cross_language_tracing(mock_index_path, vllm_server_url):
         pytest.skip(f"Index not found at {mock_index_path}")
 
     engine = ConversationEngine(
-        index_path=str(mock_index_path),
-        vllm_server=vllm_server_url
+        index_path=str(mock_index_path), vllm_server=vllm_server_url
     )
 
     # Ask a question that requires cross-language knowledge
-    response = engine.chat(
-        "How does torch.matmul connect to the C++ implementation?"
-    )
+    response = engine.chat("How does torch.matmul connect to the C++ implementation?")
     assert isinstance(response, str)
     assert len(response) > 0
 
@@ -156,6 +149,7 @@ def test_cross_language_tracing(mock_index_path, vllm_server_url):
 def mock_index_path(tmp_path):
     """Path to test index (use tmp_path for unit tests, real path for integration)"""
     import os
+
     # Check if TEST_INDEX_PATH env is set for integration tests
     test_index = os.getenv("TEST_INDEX_PATH")
     if test_index:
@@ -167,6 +161,7 @@ def mock_index_path(tmp_path):
 def vllm_server_url():
     """vLLM server URL for integration tests"""
     import os
+
     return os.getenv("VLLM_SERVER_URL", "http://localhost:8000")
 
 

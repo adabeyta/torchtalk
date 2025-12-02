@@ -1,11 +1,16 @@
 import logging
 from pathlib import Path
 from typing import Optional, List, Dict, Any
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn
+from rich.progress import (
+    Progress,
+    SpinnerColumn,
+    TextColumn,
+    BarColumn,
+    TaskProgressColumn,
+)
 import openai
 
 from llama_index.core import (
-    VectorStoreIndex,
     PropertyGraphIndex,
     StorageContext,
     load_index_from_storage,
@@ -41,9 +46,8 @@ class ConversationEngine:
         system_prompt: Optional[str] = None,
         served_model_name: Optional[str] = None,
         rerank_top_n: Optional[int] = None,
-        similarity_cutoff: float = 0.0,
-        rerank_model: str = "cross-encoder/ms-marco-MiniLM-L-6-v2",
-        graph_path_depth: int = 2,
+        rerank_model: str = "BAAI/bge-reranker-base",
+        expansion_depth: int = 1,
     ):
         """
         Initialize conversation engine.
@@ -58,9 +62,8 @@ class ConversationEngine:
             system_prompt: Optional system prompt for the chat
             served_model_name: Name under which the model is served (defaults to "torchtalk-maverick")
             rerank_top_n: Final count after reranking (auto-adjusted based on context_window if None)
-            similarity_cutoff: Minimum similarity score threshold (default: 0.5)
-            rerank_model: Cross-encoder model for reranking (default: ms-marco-MiniLM-L-6-v2)
-            graph_path_depth: Hops to traverse in PropertyGraphIndex (default: 2)
+            rerank_model: Cross-encoder model for reranking (default: BAAI/bge-reranker-base)
+            expansion_depth: How many hops to follow binding relationships (default: 1)
         """
         self.index_path = Path(index_path)
         self.vllm_server = vllm_server
@@ -69,59 +72,60 @@ class ConversationEngine:
         self.context_window = context_window
         self.memory_token_limit = memory_token_limit
         self.similarity_top_k = similarity_top_k
-        self.similarity_cutoff = similarity_cutoff
         self.rerank_model = rerank_model
-        self.graph_path_depth = graph_path_depth
+        self.expansion_depth = expansion_depth
 
         if rerank_top_n is None:
             # Auto-scale rerank_top_n based on context window
             # Research shows top-20 is more effective than top-5/10, but >50k tokens hurts quality
             if context_window <= 8192:
                 self.rerank_top_n = 8
-                log.info(f"Small context window ({context_window}), using rerank_top_n=8")
+                log.info(
+                    f"Small context window ({context_window}), using rerank_top_n=8"
+                )
             elif context_window <= 32768:
                 self.rerank_top_n = 15
-                log.info(f"Medium context window ({context_window}), using rerank_top_n=15")
+                log.info(
+                    f"Medium context window ({context_window}), using rerank_top_n=15"
+                )
             elif context_window <= 131072:
                 self.rerank_top_n = 25
-                log.info(f"Large context window ({context_window}), using rerank_top_n=25")
+                log.info(
+                    f"Large context window ({context_window}), using rerank_top_n=25"
+                )
             else:
                 # For very large context (100k+), use 30 chunks
                 # This provides comprehensive coverage while staying under ~50k tokens
                 self.rerank_top_n = 30
-                log.info(f"Very large context window ({context_window}), using rerank_top_n=30")
+                log.info(
+                    f"Very large context window ({context_window}), using rerank_top_n=30"
+                )
         else:
             self.rerank_top_n = rerank_top_n
 
         # Default system prompt - balances accuracy (no hallucination) with quality explanations
         self.system_prompt = system_prompt or (
             "You are a PyTorch codebase expert. Answer questions using the retrieved source code snippets below.\n\n"
-
             "RESPONSE STRUCTURE:\n"
             "1. **Summary**: One sentence answering the question directly.\n"
             "2. **Implementation Trace**: Show the code path from Python API → C++ → CUDA (as far as the retrieved context allows).\n"
             "3. **Code Evidence**: Quote relevant snippets VERBATIM from the retrieved context with file paths.\n"
             "4. **Explanation**: Explain how the pieces connect and why the code is structured this way.\n\n"
-
             "ACCURACY RULES:\n"
             "• Only quote code that appears EXACTLY in the retrieved context.\n"
             "• Never invent function signatures, file paths, or code that isn't shown.\n"
             "• If code for a layer of the implementation is missing, say: 'The [specific layer] was not in the retrieved context.'\n"
             "• You MAY explain concepts and connect ideas using your knowledge, but code must come from context.\n\n"
-
             "CONTEXT FORMAT:\n"
             "• Each snippet starts with [FILE: path:lines] showing the source file.\n"
             "• [CROSS-LANGUAGE BINDINGS: ...] is COMPUTED METADATA showing which operations are linked - this is NOT from the actual file content.\n"
             "• When citing native_functions.yaml, use the actual YAML format shown in the snippet (func:, dispatch:, etc.), NOT the binding metadata.\n\n"
-
             "PYTORCH IMPLEMENTATION CHAIN (trace as far as context allows):\n"
             "  Python API (torch/, torch/nn/functional) → native_functions.yaml dispatch → ATen native (aten/src/ATen/native/) → Backend kernels (cuda/*.cu, cpu/*.cpp)\n\n"
-
             "WHEN CONTEXT IS INCOMPLETE:\n"
             "• Still provide a helpful response with available information.\n"
             "• List which files were retrieved and what they contain.\n"
             "• Explain what additional context would be needed for a complete answer.\n\n"
-
             "Goal: Provide clear, accurate, developer-friendly explanations grounded in the actual PyTorch source code."
         )
 
@@ -168,7 +172,7 @@ class ConversationEngine:
         doesn't properly handle the api_url parameter for remote vLLM servers.
         """
         # Create OpenAI client for the vLLM API endpoint
-        api_base = self.vllm_server.rstrip('/') + '/v1'
+        api_base = self.vllm_server.rstrip("/") + "/v1"
         openai_client = openai.OpenAI(
             api_key="dummy",  # vLLM doesn't require authentication
             base_url=api_base,
@@ -181,34 +185,49 @@ class ConversationEngine:
         context_window = self.context_window
 
         # Create patched complete method
-        def patched_complete(llm_self, prompt: str, formatted: bool = False, **kwargs: Any) -> CompletionResponse:
+        def patched_complete(
+            llm_self, prompt: str, formatted: bool = False, **kwargs: Any
+        ) -> CompletionResponse:
             """Patched complete method that uses OpenAI API for vLLM server."""
             # Estimate input tokens (rough: 1 token ≈ 4 chars for code)
             estimated_input_tokens = len(prompt) // 3
 
             # Calculate available tokens for completion
             requested_max_tokens = kwargs.get("max_tokens", llm_self.max_new_tokens)
-            available_tokens = context_window - estimated_input_tokens - 100  # 100 token safety margin
+            available_tokens = (
+                context_window - estimated_input_tokens - 100
+            )  # 100 token safety margin
 
             # Dynamically adjust max_tokens if we're close to the limit
             if available_tokens < requested_max_tokens:
                 if available_tokens < 256:
                     # Not enough room for a meaningful response - smart truncate prompt
-                    log.warning(f"[TokenBudget] Input too long ({estimated_input_tokens} tokens est.), truncating prompt")
+                    log.warning(
+                        f"[TokenBudget] Input too long ({estimated_input_tokens} tokens est.), truncating prompt"
+                    )
                     # Smart truncation: preserve critical sections (YAML, CUDA, C++)
                     # Split prompt into sections by file markers
                     max_prompt_chars = (context_window - 2048 - 100) * 3
 
                     # Try to preserve critical cross-language files
-                    critical_patterns = ['.yaml', '.cu', '/native/', '/ATen/', '.cpp', '.h']
-                    sections = prompt.split('\n---\n')
+                    critical_patterns = [
+                        ".yaml",
+                        ".cu",
+                        "/native/",
+                        "/ATen/",
+                        ".cpp",
+                        ".h",
+                    ]
+                    sections = prompt.split("\n---\n")
 
                     if len(sections) > 1:
                         # Separate critical and non-critical sections
                         critical_sections = []
                         other_sections = []
                         for section in sections:
-                            is_critical = any(p in section[:500] for p in critical_patterns)
+                            is_critical = any(
+                                p in section[:500] for p in critical_patterns
+                            )
                             if is_critical:
                                 critical_sections.append(section)
                             else:
@@ -220,7 +239,9 @@ class ConversationEngine:
 
                         # First add critical sections
                         for section in critical_sections:
-                            if current_len + len(section) < max_prompt_chars * 0.7:  # Reserve 30% for others
+                            if (
+                                current_len + len(section) < max_prompt_chars * 0.7
+                            ):  # Reserve 30% for others
                                 result_sections.append(section)
                                 current_len += len(section)
 
@@ -230,8 +251,10 @@ class ConversationEngine:
                                 result_sections.append(section)
                                 current_len += len(section)
 
-                        prompt = '\n---\n'.join(result_sections)
-                        log.info(f"[TokenBudget] Smart truncation: kept {len(critical_sections)} critical + {len(result_sections) - len(critical_sections)} other sections")
+                        prompt = "\n---\n".join(result_sections)
+                        log.info(
+                            f"[TokenBudget] Smart truncation: kept {len(critical_sections)} critical + {len(result_sections) - len(critical_sections)} other sections"
+                        )
                     else:
                         # Fallback: simple truncation
                         prompt = prompt[:max_prompt_chars]
@@ -239,9 +262,13 @@ class ConversationEngine:
                     prompt += "\n\n[Context truncated due to length]"
                     available_tokens = 2048
                 else:
-                    log.info(f"[TokenBudget] Reducing max_tokens from {requested_max_tokens} to {available_tokens} (input: ~{estimated_input_tokens} tokens)")
+                    log.info(
+                        f"[TokenBudget] Reducing max_tokens from {requested_max_tokens} to {available_tokens} (input: ~{estimated_input_tokens} tokens)"
+                    )
 
-                actual_max_tokens = max(256, min(available_tokens, requested_max_tokens))
+                actual_max_tokens = max(
+                    256, min(available_tokens, requested_max_tokens)
+                )
             else:
                 actual_max_tokens = requested_max_tokens
 
@@ -252,8 +279,12 @@ class ConversationEngine:
                 temperature=kwargs.get("temperature", llm_self.temperature),
                 max_tokens=actual_max_tokens,
                 top_p=kwargs.get("top_p", llm_self.top_p),
-                frequency_penalty=kwargs.get("frequency_penalty", llm_self.frequency_penalty),
-                presence_penalty=kwargs.get("presence_penalty", llm_self.presence_penalty),
+                frequency_penalty=kwargs.get(
+                    "frequency_penalty", llm_self.frequency_penalty
+                ),
+                presence_penalty=kwargs.get(
+                    "presence_penalty", llm_self.presence_penalty
+                ),
                 stop=kwargs.get("stop", llm_self.stop),
             )
             return CompletionResponse(text=response.choices[0].message.content)
@@ -279,7 +310,7 @@ class ConversationEngine:
         if config_file.exists():
             try:
                 config = json.loads(config_file.read_text())
-                self.is_property_graph = (config.get("index_type") == "property_graph")
+                self.is_property_graph = config.get("index_type") == "property_graph"
                 self.use_lancedb = config.get("use_lancedb", False)
                 self.neo4j_uri = config.get("neo4j_uri")
             except (json.JSONDecodeError, OSError):
@@ -291,7 +322,7 @@ class ConversationEngine:
                 index_type_file = self.index_path / ".index_type"
                 if index_type_file.exists():
                     index_type = index_type_file.read_text().strip()
-                    self.is_property_graph = (index_type == "property_graph")
+                    self.is_property_graph = index_type == "property_graph"
             except (OSError, IOError):
                 pass
 
@@ -311,6 +342,7 @@ class ConversationEngine:
             Settings.embed_model = embed_model
             # Disable default LLM to prevent OpenAI API key validation during index loading
             from llama_index.core.llms import MockLLM
+
             Settings.llm = MockLLM()
             progress.update(task1, completed=100)
 
@@ -320,6 +352,7 @@ class ConversationEngine:
             vector_store = None
             if self.use_lancedb:
                 from llama_index.vector_stores.lancedb import LanceDBVectorStore
+
                 lancedb_path = self.index_path / "lancedb"
                 if lancedb_path.exists():
                     log.info(f"Loading LanceDB vector store from {lancedb_path}")
@@ -333,10 +366,12 @@ class ConversationEngine:
             graph_store = None
             if self.neo4j_uri and self.is_property_graph:
                 from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+
                 log.info(f"Connecting to Neo4j at {self.neo4j_uri}")
                 # Note: Neo4j credentials should be passed via environment variables
                 # or stored securely - not in the config file
                 import os
+
                 graph_store = Neo4jPropertyGraphStore(
                     username=os.environ.get("NEO4J_USER", "neo4j"),
                     password=os.environ.get("NEO4J_PASSWORD", ""),
@@ -387,7 +422,7 @@ class ConversationEngine:
 
     def _create_chat_engine(self) -> CondensePlusContextChatEngine:
         """Create chat engine with memory"""
-        from torchtalk.engine.postprocessed_retriever import PostprocessedRetriever
+        from torchtalk.engine.graph_expanded_retriever import GraphExpandedRetriever
 
         # Create memory buffer
         memory = ChatMemoryBuffer.from_defaults(
@@ -410,13 +445,12 @@ class ConversationEngine:
         else:
             max_final_nodes = 80
 
-        retriever = PostprocessedRetriever(
+        retriever = GraphExpandedRetriever(
             index=self.index,
             similarity_top_k=self.similarity_top_k,
             rerank_top_n=self.rerank_top_n,
-            similarity_cutoff=self.similarity_cutoff,
             rerank_model=self.rerank_model,
-            graph_path_depth=self.graph_path_depth,
+            expansion_depth=self.expansion_depth,
             max_final_nodes=max_final_nodes,
         )
 
@@ -448,16 +482,22 @@ class ConversationEngine:
         """
         response = self.chat_engine.chat(message)
         log.info(f"LlamaIndex response object type: {type(response)}")
-        log.info(f"LlamaIndex response has 'response' attr: {hasattr(response, 'response')}")
+        log.info(
+            f"LlamaIndex response has 'response' attr: {hasattr(response, 'response')}"
+        )
 
         # Extract the actual response text from the response object for LlamaIndex
-        if hasattr(response, 'response'):
+        if hasattr(response, "response"):
             response_text = response.response
-            log.info(f"Extracted response.response: '{response_text}' (length: {len(str(response_text))})")
+            log.info(
+                f"Extracted response.response: '{response_text}' (length: {len(str(response_text))})"
+            )
             return response_text
         else:
             response_text = str(response)
-            log.info(f"Converted to str: '{response_text}' (length: {len(response_text)})")
+            log.info(
+                f"Converted to str: '{response_text}' (length: {len(response_text)})"
+            )
             return response_text
 
     def reset(self):

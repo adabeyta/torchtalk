@@ -36,23 +36,27 @@ def test_vllm_import():
     """Test that vLLM can be imported"""
     try:
         import vllm
+
         assert vllm.__version__ is not None
     except ImportError:
         pytest.skip("vLLM not installed")
 
 
-@pytest.mark.skipif(not Path("/proc/driver/nvidia/version").exists(),
-                    reason="No NVIDIA GPU detected")
+@pytest.mark.skipif(
+    not Path("/proc/driver/nvidia/version").exists(), reason="No NVIDIA GPU detected"
+)
 def test_nvidia_smi():
     """Test that nvidia-smi is available"""
     import subprocess
+
     result = subprocess.run(["nvidia-smi"], capture_output=True)
     assert result.returncode == 0
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not Path("/proc/driver/nvidia/version").exists(),
-                    reason="No NVIDIA GPU detected")
+@pytest.mark.skipif(
+    not Path("/proc/driver/nvidia/version").exists(), reason="No NVIDIA GPU detected"
+)
 def test_vllm_server_health(vllm_server_url):
     """Test vLLM server health endpoint (requires running server)"""
     requests = pytest.importorskip("requests")
@@ -65,8 +69,9 @@ def test_vllm_server_health(vllm_server_url):
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not Path("/proc/driver/nvidia/version").exists(),
-                    reason="No NVIDIA GPU detected")
+@pytest.mark.skipif(
+    not Path("/proc/driver/nvidia/version").exists(), reason="No NVIDIA GPU detected"
+)
 def test_vllm_models_endpoint(vllm_server_url):
     """Test vLLM /v1/models endpoint (requires running server)"""
     requests = pytest.importorskip("requests")
@@ -82,26 +87,23 @@ def test_vllm_models_endpoint(vllm_server_url):
 
 
 @pytest.mark.integration
-@pytest.mark.skipif(not Path("/proc/driver/nvidia/version").exists(),
-                    reason="No NVIDIA GPU detected")
+@pytest.mark.skipif(
+    not Path("/proc/driver/nvidia/version").exists(), reason="No NVIDIA GPU detected"
+)
 def test_vllm_basic_inference(vllm_server_url):
     """Test basic inference with short prompt (requires running server)"""
     requests = pytest.importorskip("requests")
 
     payload = {
         "model": MODEL,
-        "messages": [
-            {"role": "user", "content": "What is 2+2?"}
-        ],
+        "messages": [{"role": "user", "content": "What is 2+2?"}],
         "max_tokens": 50,
-        "temperature": 0.0
+        "temperature": 0.0,
     }
 
     try:
         response = requests.post(
-            f"{vllm_server_url}/v1/chat/completions",
-            json=payload,
-            timeout=30
+            f"{vllm_server_url}/v1/chat/completions", json=payload, timeout=30
         )
         assert response.status_code == 200
         data = response.json()
@@ -115,8 +117,9 @@ def test_vllm_basic_inference(vllm_server_url):
 
 @pytest.mark.slow
 @pytest.mark.integration
-@pytest.mark.skipif(not Path("/proc/driver/nvidia/version").exists(),
-                    reason="No NVIDIA GPU detected")
+@pytest.mark.skipif(
+    not Path("/proc/driver/nvidia/version").exists(), reason="No NVIDIA GPU detected"
+)
 def test_vllm_long_context(vllm_server_url):
     """Test long context handling (~10k tokens) (requires running server)"""
     requests = pytest.importorskip("requests")
@@ -127,17 +130,18 @@ def test_vllm_long_context(vllm_server_url):
     payload = {
         "model": MODEL,
         "messages": [
-            {"role": "user", "content": f"{long_text}\n\nSummarize the above in one word."}
+            {
+                "role": "user",
+                "content": f"{long_text}\n\nSummarize the above in one word.",
+            }
         ],
         "max_tokens": 10,
-        "temperature": 0.0
+        "temperature": 0.0,
     }
 
     try:
         response = requests.post(
-            f"{vllm_server_url}/v1/chat/completions",
-            json=payload,
-            timeout=60
+            f"{vllm_server_url}/v1/chat/completions", json=payload, timeout=60
         )
         assert response.status_code == 200
         data = response.json()

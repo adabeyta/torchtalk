@@ -12,11 +12,174 @@ from llama_index.core.graph_stores.types import (
 )
 from pathlib import Path
 from typing import List, Dict, Union
+import networkx as nx
 
 from torchtalk.analysis.binding_detector import BindingDetector, Binding
 from torchtalk.analysis.repo_analyzer import RepoAnalyzer
 
 log = logging.getLogger(__name__)
+
+
+def generate_chunk_context(
+    rel_path: str,
+    language: str,
+    start_line: int,
+    end_line: int,
+    text: str,
+    bindings: List[Dict] = None,
+    file_importance: float = 0.0,
+) -> str:
+    """
+    Generate contextual prefix for a code chunk following Anthropic's Contextual Retrieval.
+
+    This prepends semantic context to each chunk BEFORE embedding, helping the embedding
+    model understand what the chunk is about even when the code itself is ambiguous.
+
+    For example, a chunk containing "return x" becomes:
+    "[FILE: torch/nn/functional.py] [FUNCTION: layer_norm] [LINES: 2914-2920]
+    This is the Python API for layer normalization in PyTorch's nn.functional module.
+    return x"
+
+    Args:
+        rel_path: Relative file path (e.g., "torch/nn/functional.py")
+        language: Programming language (python, cpp, cuda, yaml)
+        start_line: Starting line number
+        end_line: Ending line number
+        text: The actual code text
+        bindings: Cross-language binding information
+        file_importance: PageRank-based importance score
+
+    Returns:
+        Context string to prepend to the chunk
+    """
+    context_parts = []
+
+    # 1. File location context
+    context_parts.append(f"[FILE: {rel_path}]")
+
+    # 2. Line range
+    if start_line and end_line:
+        context_parts.append(f"[LINES: {start_line}-{end_line}]")
+
+    # 3. Language/layer context - helps distinguish Python API from C++ impl from CUDA kernel
+    layer_desc = {
+        "python": "Python",
+        "cpp": "C++",
+        "cuda": "CUDA",
+        "yaml": "YAML configuration",
+    }.get(language, language)
+    context_parts.append(f"[LANG: {layer_desc}]")
+
+    # 4. PyTorch-specific path context - helps embeddings understand the role of this file
+    path_context = _infer_path_context(rel_path)
+    if path_context:
+        context_parts.append(f"[COMPONENT: {path_context}]")
+
+    # 5. Cross-language binding context - critical for finding related implementations
+    if bindings:
+        binding_names = []
+        for b in bindings[:3]:  # Limit to avoid overly long context
+            cpp_name = b.get("cpp_name", "")
+            py_name = b.get("python_name", "")
+            if cpp_name and py_name and cpp_name != py_name:
+                binding_names.append(f"{py_name}/{cpp_name}")
+            elif cpp_name:
+                binding_names.append(cpp_name)
+            elif py_name:
+                binding_names.append(py_name)
+        if binding_names:
+            context_parts.append(f"[BINDINGS: {', '.join(binding_names)}]")
+
+    # 6. Extract function/class names from code for additional context
+    code_symbols = _extract_code_symbols(text, language)
+    if code_symbols:
+        context_parts.append(f"[DEFINES: {', '.join(code_symbols[:5])}]")
+
+    # 7. High-importance file indicator
+    if file_importance > 0.5:
+        context_parts.append("[CORE_FILE]")
+
+    return " ".join(context_parts)
+
+
+def _infer_path_context(rel_path: str) -> str:
+    """Infer the role of a file based on its path in the PyTorch codebase."""
+    path_lower = rel_path.lower()
+
+    # Python API layers
+    if "torch/nn/functional" in path_lower:
+        return "PyTorch nn.functional API"
+    if "torch/nn/modules" in path_lower:
+        return "PyTorch nn.Module classes"
+    if "torch/autograd" in path_lower:
+        return "PyTorch autograd system"
+    if "torch/_refs" in path_lower:
+        return "PyTorch reference implementations"
+    if "torch/functional" in path_lower:
+        return "PyTorch functional API"
+
+    # ATen native implementations
+    if "aten/src/aten/native/cuda" in path_lower:
+        return "ATen CUDA kernel implementations"
+    if "aten/src/aten/native/cpu" in path_lower:
+        return "ATen CPU implementations"
+    if "aten/src/aten/native" in path_lower:
+        return "ATen native operator implementations"
+    if "native_functions.yaml" in path_lower:
+        return "ATen operator dispatch declarations"
+    if "derivatives.yaml" in path_lower:
+        return "Autograd derivative formulas"
+
+    # C++ API
+    if "torch/csrc/autograd" in path_lower:
+        return "C++ autograd engine"
+    if "torch/csrc/api" in path_lower:
+        return "C++ frontend API"
+    if "torch/csrc/jit" in path_lower:
+        return "TorchScript JIT compiler"
+
+    # Tools and codegen
+    if "tools/autograd" in path_lower:
+        return "Autograd code generation"
+    if "torchgen" in path_lower:
+        return "PyTorch code generation"
+
+    return ""
+
+
+def _extract_code_symbols(text: str, language: str) -> List[str]:
+    """Extract function/class/kernel names defined in this chunk."""
+    symbols = []
+
+    if language == "python":
+        # Python function and class definitions
+        symbols.extend(re.findall(r"^def\s+(\w+)\s*\(", text, re.MULTILINE))
+        symbols.extend(re.findall(r"^class\s+(\w+)", text, re.MULTILINE))
+        # Also catch decorated functions
+        symbols.extend(re.findall(r"@\w+\s*\ndef\s+(\w+)", text))
+    elif language in ("cpp", "cuda"):
+        # C++ function definitions (simplified)
+        symbols.extend(
+            re.findall(r"(?:void|int|float|bool|Tensor|auto)\s+(\w+)\s*\(", text)
+        )
+        # CUDA kernels
+        symbols.extend(re.findall(r"__global__\s+void\s+(\w+)", text))
+        # Template functions
+        symbols.extend(re.findall(r"template.*?\n.*?(\w+)\s*\(", text))
+    elif language == "yaml":
+        # YAML function entries (native_functions.yaml style)
+        symbols.extend(re.findall(r"^- func:\s*(\w+)", text, re.MULTILINE))
+        symbols.extend(re.findall(r"^\s+(\w+):", text, re.MULTILINE))
+
+    # Deduplicate while preserving order
+    seen = set()
+    unique = []
+    for s in symbols:
+        if s not in seen and len(s) > 2:  # Skip very short names
+            seen.add(s)
+            unique.append(s)
+
+    return unique
 
 
 class BindingGraphExtractor(TransformComponent):
@@ -40,9 +203,9 @@ class BindingGraphExtractor(TransformComponent):
         super().__init__(**kwargs)
 
         # Now set our fields
-        object.__setattr__(self, 'repo_root', repo_root)
-        object.__setattr__(self, 'py_to_cpp', defaultdict(list))
-        object.__setattr__(self, 'cpp_to_binding', defaultdict(list))
+        object.__setattr__(self, "repo_root", repo_root)
+        object.__setattr__(self, "py_to_cpp", defaultdict(list))
+        object.__setattr__(self, "cpp_to_binding", defaultdict(list))
 
         # Index bindings by python_name and cpp_name for O(1) lookup
         for b in bindings:
@@ -61,16 +224,16 @@ class BindingGraphExtractor(TransformComponent):
         symbols = []
 
         if lang == "python":
-            symbols.extend(re.findall(r'def\s+(\w+)\s*\(', text))
-            symbols.extend(re.findall(r'torch\.ops\.aten\.(\w+)', text))
-            symbols.extend(re.findall(r'aten::(\w+)', text))
-            symbols.extend(re.findall(r'F\.(\w+)\s*\(', text))  # F.softmax(
+            symbols.extend(re.findall(r"def\s+(\w+)\s*\(", text))
+            symbols.extend(re.findall(r"torch\.ops\.aten\.(\w+)", text))
+            symbols.extend(re.findall(r"aten::(\w+)", text))
+            symbols.extend(re.findall(r"F\.(\w+)\s*\(", text))  # F.softmax(
         elif lang in ("cpp", "cuda"):
-            symbols.extend(re.findall(r'aten::(\w+)', text))
-            symbols.extend(re.findall(r'DEFINE_DISPATCH\((\w+)_stub\)', text))
-            symbols.extend(re.findall(r'__global__\s+void\s+(\w+)', text))
-            symbols.extend(re.findall(r'(\w+)_kernel\s*\(', text))
-            symbols.extend(re.findall(r'(\w+)_cuda\s*\(', text))
+            symbols.extend(re.findall(r"aten::(\w+)", text))
+            symbols.extend(re.findall(r"DEFINE_DISPATCH\((\w+)_stub\)", text))
+            symbols.extend(re.findall(r"__global__\s+void\s+(\w+)", text))
+            symbols.extend(re.findall(r"(\w+)_kernel\s*\(", text))
+            symbols.extend(re.findall(r"(\w+)_cuda\s*\(", text))
 
         return [s.lower() for s in set(symbols)]
 
@@ -146,11 +309,105 @@ class GraphEnhancedIndexer:
         self._analysis_ready = False
 
     def _canon(self, p: str) -> str:
-        """Canonicalize path to relative POSIX form"""
+        """Canonicalize path to relative POSIX form.
+
+        Handles both:
+        - Absolute paths like /torchtalk/pytorch/torch/nn/functional.py
+        - Relative paths like torch/nn/functional.py (from import graph)
+        """
+        path = Path(p)
+
+        # If path is already relative to repo root, just return normalized form
+        if not path.is_absolute():
+            # Check if it's a valid path relative to repo root
+            if (self.repo_root / path).exists():
+                return path.as_posix()
+            # Fallback: resolve and try to make relative
+            path = path.resolve()
+
+        # For absolute paths, make relative to repo root
         try:
-            return Path(p).resolve().relative_to(self.repo_root).as_posix()
-        except Exception:
-            return Path(p).resolve().as_posix()
+            return path.relative_to(self.repo_root).as_posix()
+        except ValueError:
+            # Path not under repo root - return as-is
+            return path.as_posix()
+
+    def _compute_file_importance(self) -> Dict[str, float]:
+        """
+        Compute file importance using PageRank on the import graph.
+
+        This is a general, non-hardcoded approach to ranking files:
+        - Files imported by many important files get higher scores
+        - Based on Sourcegraph's approach to code search ranking
+
+        The import graph has edges A→B where A imports B.
+        PageRank gives high scores to nodes with many incoming edges (B is imported by A),
+        so files that are imported by many other files get higher scores.
+
+        Returns:
+            Dict mapping canonical file paths to importance scores (0.0-1.0)
+        """
+        import_graph = self.repo_analyzer.import_graph
+
+        if import_graph.number_of_nodes() == 0:
+            return {}
+
+        try:
+            # Run PageRank with damping factor 0.85 (standard)
+            # Files with many incoming edges (imported by many files) get high scores
+            pagerank_scores = nx.pagerank(import_graph, alpha=0.85, max_iter=100)
+        except Exception as e:
+            log.warning(f"PageRank computation failed: {e}")
+            return {}
+
+        # Normalize to 0-1 range
+        if not pagerank_scores:
+            return {}
+
+        max_score = max(pagerank_scores.values())
+        min_score = min(pagerank_scores.values())
+        score_range = max_score - min_score if max_score > min_score else 1.0
+
+        normalized = {}
+        for path, score in pagerank_scores.items():
+            canon_path = self._canon(str(path))
+            normalized[canon_path] = (score - min_score) / score_range
+
+        # Also compute binding density scores (files with more bindings are more important)
+        # This helps rank C++/CUDA implementation files that might not be in import graph
+        binding_counts = defaultdict(int)
+        for path, bindings in self._bindings_by_file.items():
+            binding_counts[path] = len(bindings)
+
+        if binding_counts:
+            max_bindings = max(binding_counts.values())
+            binding_normalized = {}
+            for path, count in binding_counts.items():
+                binding_normalized[path] = (
+                    count / max_bindings if max_bindings > 0 else 0
+                )
+
+            # Combine PageRank and binding density:
+            # - Files in both: max(PageRank, binding) to keep high-PageRank files important
+            # - Files only in PageRank: keep their score (important Python modules)
+            # - Files only in bindings: use binding score (C++/CUDA impl files)
+            all_paths = set(normalized.keys()) | set(binding_normalized.keys())
+            combined = {}
+            for path in all_paths:
+                pr_score = normalized.get(path, 0.0)
+                bind_score = binding_normalized.get(path, 0.0)
+                # Use max() so high PageRank files stay important even without bindings
+                # and binding-heavy files get importance even if not in import graph
+                combined[path] = max(pr_score, bind_score)
+            normalized = combined
+
+        # Log top important files for debugging
+        top_files = sorted(normalized.items(), key=lambda x: x[1], reverse=True)[:10]
+        log.info("Top 10 important files by PageRank+bindings:")
+        for path, score in top_files:
+            log.info(f"  {score:.3f}: {path[:70]}")
+
+        return normalized
 
     def build_index(
         self,
@@ -188,14 +445,20 @@ class GraphEnhancedIndexer:
             try:
                 self.repo_analyzer.analyze_repository()
             except Exception as e:
-                log.warning("Repo analysis failed, continuing with partial features: %s", e)
+                log.warning(
+                    "Repo analysis failed, continuing with partial features: %s", e
+                )
 
             log.info("Detecting cross-language bindings...")
             try:
-                self.bindings = self.binding_detector.detect_bindings_in_directory(str(self.repo_path))
+                self.bindings = self.binding_detector.detect_bindings_in_directory(
+                    str(self.repo_path)
+                )
             except Exception as e:
-                log.warning("Binding detection failed, continuing without bindings: %s", e)
-                self.bindings = type('obj', (object,), {'bindings': []})()
+                log.warning(
+                    "Binding detection failed, continuing without bindings: %s", e
+                )
+                self.bindings = type("obj", (object,), {"bindings": []})()
 
             # Pre-index bindings by file with canonical paths
             self._bindings_by_file = {}
@@ -221,25 +484,36 @@ class GraphEnhancedIndexer:
 
             # Pre-index graph nodes with canonical paths
             self._import_nodes_canon = {
-                self._canon(str(n)): n
-                for n in self.repo_analyzer.import_graph.nodes()
+                self._canon(str(n)): n for n in self.repo_analyzer.import_graph.nodes()
             }
             self._call_nodes_canon = {
-                self._canon(str(n)): n
-                for n in self.repo_analyzer.call_graph.nodes()
+                self._canon(str(n)): n for n in self.repo_analyzer.call_graph.nodes()
             }
 
             log.info("Analysis complete:")
-            log.info(f"  - Found {sum(len(v) for v in self._bindings_by_file.values())} cross-language bindings")
-            log.info(f"  - Built call graph: {self.repo_analyzer.call_graph.number_of_nodes()} nodes")
-            log.info(f"  - Built import graph: {self.repo_analyzer.import_graph.number_of_nodes()} nodes")
+            log.info(
+                f"  - Found {sum(len(v) for v in self._bindings_by_file.values())} cross-language bindings"
+            )
+            log.info(
+                f"  - Built call graph: {self.repo_analyzer.call_graph.number_of_nodes()} nodes"
+            )
+            log.info(
+                f"  - Built import graph: {self.repo_analyzer.import_graph.number_of_nodes()} nodes"
+            )
+
+            # Compute file importance using PageRank on the import graph
+            # Files that are imported by many other important files get higher scores
+            self._file_importance = self._compute_file_importance()
+            log.info(
+                f"  - Computed importance scores for {len(self._file_importance)} files"
+            )
 
             self._analysis_ready = True
 
         # Load documents with injected metadata
-        log.info("\n" + "="*60)
+        log.info("\n" + "=" * 60)
         log.info("Loading documents")
-        log.info("="*60)
+        log.info("=" * 60)
 
         documents = SimpleDirectoryReader(
             str(self.repo_path),
@@ -256,24 +530,29 @@ class GraphEnhancedIndexer:
         log.info(f"Loaded {len(documents)} documents")
 
         # Parse into nodes with code-aware splitter
-        log.info("\n" + "="*60)
+        log.info("\n" + "=" * 60)
         log.info("Parsing into nodes (code-aware)")
-        log.info("="*60)
+        log.info("=" * 60)
 
         from tree_sitter_language_pack import get_parser
 
         # Map file extensions to languages
         lang_map = {
-            '.py': 'python',
-            '.cpp': 'cpp', '.cc': 'cpp', '.cu': 'cpp',
-            '.cuh': 'cpp', '.h': 'cpp', '.hpp': 'cpp',
-            '.yaml': 'yaml', '.yml': 'yaml',
+            ".py": "python",
+            ".cpp": "cpp",
+            ".cc": "cpp",
+            ".cu": "cpp",
+            ".cuh": "cpp",
+            ".h": "cpp",
+            ".hpp": "cpp",
+            ".yaml": "yaml",
+            ".yml": "yaml",
         }
 
         # Group documents by language
         docs_by_lang = {}
         for doc in documents:
-            ext = Path(doc.metadata.get('file_path', '')).suffix
+            ext = Path(doc.metadata.get("file_path", "")).suffix
             lang = lang_map.get(ext)
             if lang:
                 docs_by_lang.setdefault(lang, []).append(doc)
@@ -291,7 +570,7 @@ class GraphEnhancedIndexer:
                 language=lang,
                 chunk_lines=80,  # Reduced from 200 for better precision
                 chunk_lines_overlap=15,  # ~20% overlap for context continuity
-                parser=get_parser(lang)
+                parser=get_parser(lang),
             )
 
             # Parse documents with error handling
@@ -310,16 +589,16 @@ class GraphEnhancedIndexer:
         log.info(f"Created {len(nodes)} nodes")
 
         # Enhance with graph metadata
-        log.info("\n" + "="*60)
+        log.info("\n" + "=" * 60)
         log.info("Enhancing with graph metadata")
-        log.info("="*60)
+        log.info("=" * 60)
 
         enhanced_nodes = self._enhance_nodes_with_graphs(nodes)
 
         log.info(f"Enhanced {len(enhanced_nodes)} nodes")
 
         # Build index
-        log.info("\n" + "="*60)
+        log.info("\n" + "=" * 60)
         backend_info = []
         if use_property_graph:
             backend_info.append("PropertyGraphIndex")
@@ -330,7 +609,7 @@ class GraphEnhancedIndexer:
         if neo4j_uri:
             backend_info.append("Neo4j")
         log.info(f"Building {' + '.join(backend_info)}")
-        log.info("="*60)
+        log.info("=" * 60)
 
         # Set up code-specific embedding model with GPU acceleration and large batches
         from llama_index.embeddings.huggingface import HuggingFaceEmbedding
@@ -357,6 +636,7 @@ class GraphEnhancedIndexer:
         vector_store = None
         if use_lancedb:
             from llama_index.vector_stores.lancedb import LanceDBVectorStore
+
             lancedb_path = persist_dir / "lancedb"
             log.info(f"Using LanceDB vector store at {lancedb_path}")
             vector_store = LanceDBVectorStore(
@@ -369,6 +649,7 @@ class GraphEnhancedIndexer:
         graph_store = None
         if neo4j_uri and use_property_graph:
             from llama_index.graph_stores.neo4j import Neo4jPropertyGraphStore
+
             log.info(f"Using Neo4j graph store at {neo4j_uri}")
             graph_store = Neo4jPropertyGraphStore(
                 username=neo4j_user or "neo4j",
@@ -385,10 +666,14 @@ class GraphEnhancedIndexer:
 
             # First, build a VectorStoreIndex to embed ALL text nodes
             # PropertyGraphIndex only embeds kg_nodes (graph entities), not source text
-            log.info(f"Building vector embeddings for {len(enhanced_nodes)} text nodes...")
+            log.info(
+                f"Building vector embeddings for {len(enhanced_nodes)} text nodes..."
+            )
 
             if vector_store:
-                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                storage_context = StorageContext.from_defaults(
+                    vector_store=vector_store
+                )
                 vector_index = VectorStoreIndex(
                     nodes=enhanced_nodes,
                     embed_model=embed_model,
@@ -438,17 +723,16 @@ class GraphEnhancedIndexer:
                 index.storage_context.docstore = vector_index.storage_context.docstore
         else:
             if vector_store:
-                storage_context = StorageContext.from_defaults(vector_store=vector_store)
+                storage_context = StorageContext.from_defaults(
+                    vector_store=vector_store
+                )
                 index = VectorStoreIndex(
                     nodes=enhanced_nodes,
                     storage_context=storage_context,
-                    show_progress=True
+                    show_progress=True,
                 )
             else:
-                index = VectorStoreIndex(
-                    nodes=enhanced_nodes,
-                    show_progress=True
-                )
+                index = VectorStoreIndex(nodes=enhanced_nodes, show_progress=True)
 
         # Persist (LlamaIndex built-in)
         # Note: Neo4j graph store persists to Neo4j directly, not to disk
@@ -457,6 +741,7 @@ class GraphEnhancedIndexer:
 
         # Save index configuration for loading
         import json
+
         config = {
             "index_type": "property_graph" if use_property_graph else "vector",
             "use_lancedb": use_lancedb,
@@ -469,11 +754,13 @@ class GraphEnhancedIndexer:
         index_type_file = persist_dir / ".index_type"
         index_type_file.write_text("property_graph" if use_property_graph else "vector")
 
-        log.info("\n" + "="*60)
+        log.info("\n" + "=" * 60)
         log.info("Index built successfully!")
-        log.info("="*60)
+        log.info("=" * 60)
         log.info(f"Location: {persist_dir}")
-        log.info(f"Index type: {'PropertyGraphIndex' if use_property_graph else 'VectorStoreIndex'}")
+        log.info(
+            f"Index type: {'PropertyGraphIndex' if use_property_graph else 'VectorStoreIndex'}"
+        )
         if use_lancedb:
             log.info("Vector store: LanceDB (hybrid search enabled)")
         if neo4j_uri:
@@ -485,7 +772,9 @@ class GraphEnhancedIndexer:
 
         return index
 
-    def _compute_line_numbers(self, node: TextNode, file_content_cache: Dict[str, str]) -> None:
+    def _compute_line_numbers(
+        self, node: TextNode, file_content_cache: Dict[str, str]
+    ) -> None:
         """
         Compute start_line and end_line from character indices.
 
@@ -505,15 +794,17 @@ class GraphEnhancedIndexer:
 
         if file_path not in file_content_cache:
             try:
-                file_content_cache[file_path] = Path(file_path).read_text(encoding='utf-8')
+                file_content_cache[file_path] = Path(file_path).read_text(
+                    encoding="utf-8"
+                )
             except Exception:
                 return
 
         content = file_content_cache[file_path]
 
         # Count newlines up to start and end positions
-        start_line = content[:start_idx].count('\n') + 1
-        end_line = content[:end_idx].count('\n') + 1
+        start_line = content[:start_idx].count("\n") + 1
+        end_line = content[:end_idx].count("\n") + 1
 
         node.metadata["start_line"] = start_line
         node.metadata["end_line"] = end_line
@@ -523,7 +814,7 @@ class GraphEnhancedIndexer:
 
         Note: Complex metadata (lists, dicts) are serialized to JSON strings for
         LanceDB compatibility which requires flat metadata (str, int, float, None).
-        The postprocessors in postprocessed_retriever.py handle deserialization.
+        The postprocessors in graph_expanded_retriever.py handle deserialization.
         """
         import json
 
@@ -538,9 +829,12 @@ class GraphEnhancedIndexer:
             rel_path = node.metadata.get("rel_path")
             if not rel_path:
                 # Fallback to file_path if rel_path not set
-                file_path = (node.metadata.get("file_path") or
-                            node.metadata.get("file_name") or
-                            node.metadata.get("filename") or "")
+                file_path = (
+                    node.metadata.get("file_path")
+                    or node.metadata.get("file_name")
+                    or node.metadata.get("filename")
+                    or ""
+                )
                 if file_path:
                     rel_path = self._canon(file_path)
                 else:
@@ -573,6 +867,33 @@ class GraphEnhancedIndexer:
             node.metadata.setdefault("function_calls", "[]")
             node.metadata.setdefault("imports", "[]")
 
+            # Exclude verbose/redundant metadata from embedding
+            # The contextual_header will contain the important semantic info
+            node.excluded_embed_metadata_keys = [
+                "file_path",
+                "rel_path",
+                "schema",
+                "has_bindings",
+                "cross_language_bindings",
+                "function_calls",
+                "imports",
+                "file_importance",
+                "start_line",
+                "end_line",
+                "language",
+            ]
+            # Keep all metadata available for LLM context
+            node.excluded_llm_metadata_keys = [
+                "schema",
+                "file_importance",
+                "has_bindings",
+            ]
+
+            # Add file importance score (PageRank-based)
+            # This is a general, non-hardcoded ranking signal
+            file_importance = self._file_importance.get(rel_path, 0.0)
+            node.metadata["file_importance"] = file_importance
+
             # Add binding information - first try file-based lookup
             bindings = self._get_bindings_for_file(rel_path)
 
@@ -604,8 +925,23 @@ class GraphEnhancedIndexer:
                 # Serialize to JSON for LanceDB compatibility
                 node.metadata["imports"] = json.dumps(imports)
 
+            # Generate contextual header for improved retrieval (Anthropic's Contextual Retrieval)
+            # This prepends semantic context to the chunk text before embedding
+            context_header = generate_chunk_context(
+                rel_path=rel_path,
+                language=lang,
+                start_line=node.metadata.get("start_line"),
+                end_line=node.metadata.get("end_line"),
+                text=node.get_content(),
+                bindings=bindings if bindings else None,
+                file_importance=file_importance,
+            )
+            # Store as metadata - LlamaIndex will prepend this during embedding
+            node.metadata["contextual_header"] = context_header
+
         log.info(f"  - Enhanced {enhanced_count} nodes with cross-language bindings")
         log.info(f"  - Added line numbers to {line_number_count} nodes")
+        log.info(f"  - Added contextual headers to {len(nodes)} nodes")
 
         return nodes
 
@@ -620,7 +956,7 @@ class GraphEnhancedIndexer:
         This handles native_functions.yaml bindings which have file_path pointing
         to the YAML file, not the actual implementation files.
         """
-        if not hasattr(self, '_bindings_by_name') or not self._bindings_by_name:
+        if not hasattr(self, "_bindings_by_name") or not self._bindings_by_name:
             return []
 
         matched_bindings = []
@@ -630,23 +966,25 @@ class GraphEnhancedIndexer:
         symbols = []
         if lang == "python":
             # Python: torch.ops.aten.xxx, aten::xxx, F.xxx
-            symbols.extend(re.findall(r'torch\.ops\.aten\.(\w+)', text))
-            symbols.extend(re.findall(r'aten::(\w+)', text))
-            symbols.extend(re.findall(r'F\.(\w+)\s*\(', text))
-            symbols.extend(re.findall(r'def\s+(\w+)\s*\(', text))
+            symbols.extend(re.findall(r"torch\.ops\.aten\.(\w+)", text))
+            symbols.extend(re.findall(r"aten::(\w+)", text))
+            symbols.extend(re.findall(r"F\.(\w+)\s*\(", text))
+            symbols.extend(re.findall(r"def\s+(\w+)\s*\(", text))
         elif lang in ("cpp", "cuda"):
             # C++/CUDA: function definitions, DEFINE_DISPATCH, kernels
-            symbols.extend(re.findall(r'aten::(\w+)', text))
-            symbols.extend(re.findall(r'DEFINE_DISPATCH\((\w+)_stub\)', text))
+            symbols.extend(re.findall(r"aten::(\w+)", text))
+            symbols.extend(re.findall(r"DEFINE_DISPATCH\((\w+)_stub\)", text))
             # Match function definitions: type funcname( - captures full name
-            symbols.extend(re.findall(r'(?:^|\s)(\w+)\s*\([^)]*\)\s*\{', text, re.MULTILINE))
+            symbols.extend(
+                re.findall(r"(?:^|\s)(\w+)\s*\([^)]*\)\s*\{", text, re.MULTILINE)
+            )
             # Match xxx_kernel patterns (for kernel templates)
-            symbols.extend(re.findall(r'(\w+_kernel)\s*[<\(]', text))
+            symbols.extend(re.findall(r"(\w+_kernel)\s*[<\(]", text))
             # Match xxx_cuda and xxx_cpu function names (full name including suffix)
-            symbols.extend(re.findall(r'\b(\w+_cuda)\s*\(', text))
-            symbols.extend(re.findall(r'\b(\w+_cpu)\s*\(', text))
+            symbols.extend(re.findall(r"\b(\w+_cuda)\s*\(", text))
+            symbols.extend(re.findall(r"\b(\w+_cpu)\s*\(", text))
             # Match native_xxx patterns
-            symbols.extend(re.findall(r'\b(native_\w+)\b', text))
+            symbols.extend(re.findall(r"\b(native_\w+)\b", text))
 
         # Look up each symbol in the bindings index (indexed by both cpp_name and python_name)
         for sym in symbols:
@@ -670,10 +1008,9 @@ class GraphEnhancedIndexer:
             calls = []
             successors = list(self.repo_analyzer.call_graph.successors(node))
             if successors:
-                calls.append({
-                    "function": str(node),
-                    "calls": [str(s) for s in successors[:10]]
-                })
+                calls.append(
+                    {"function": str(node), "calls": [str(s) for s in successors[:10]]}
+                )
             return calls[:10]
 
         return []

@@ -55,10 +55,14 @@ class RepoAnalyzer:
         for file_path in python_files:
             self._analyze_file(file_path)
 
-        log.info(f"Import graph: {self.import_graph.number_of_nodes()} nodes, "
-                 f"{self.import_graph.number_of_edges()} edges")
-        log.info(f"Call graph: {self.call_graph.number_of_nodes()} nodes, "
-                 f"{self.call_graph.number_of_edges()} edges")
+        log.info(
+            f"Import graph: {self.import_graph.number_of_nodes()} nodes, "
+            f"{self.import_graph.number_of_edges()} edges"
+        )
+        log.info(
+            f"Call graph: {self.call_graph.number_of_nodes()} nodes, "
+            f"{self.call_graph.number_of_edges()} edges"
+        )
 
         # Return empty dict for backward compatibility
         # (graph_enhanced_indexer.py stores this but never uses it)
@@ -75,8 +79,18 @@ class RepoAnalyzer:
 
             for part in path_parts:
                 part_lower = part.lower()
-                if any(pattern in part_lower for pattern in
-                       ['test', 'example', '__pycache__', 'build', 'dist', '.git', 'benchmark']):
+                if any(
+                    pattern in part_lower
+                    for pattern in [
+                        "test",
+                        "example",
+                        "__pycache__",
+                        "build",
+                        "dist",
+                        ".git",
+                        "benchmark",
+                    ]
+                ):
                     skip = True
                     break
 
@@ -89,7 +103,7 @@ class RepoAnalyzer:
     def _analyze_file(self, file_path: Path):
         """Analyze a single Python file for imports and calls."""
         try:
-            with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                 content = f.read()
 
             tree = ast.parse(content)
@@ -130,8 +144,8 @@ class RepoAnalyzer:
         """
         # Convert import to potential file paths
         potential_paths = [
-            import_name.replace('.', '/') + '.py',
-            import_name.replace('.', '/') + '/__init__.py',
+            import_name.replace(".", "/") + ".py",
+            import_name.replace(".", "/") + "/__init__.py",
         ]
 
         for path in potential_paths:

@@ -6,7 +6,9 @@ from pathlib import Path
 logging.basicConfig(level=logging.INFO)
 
 
-@pytest.mark.skipif(not Path("../pytorch").exists(), reason="PyTorch repo not available")
+@pytest.mark.skipif(
+    not Path("../pytorch").exists(), reason="PyTorch repo not available"
+)
 def test_indexer_initialization():
     """Test that indexer can be initialized"""
     from torchtalk.indexing import GraphEnhancedIndexer
@@ -35,7 +37,9 @@ def test_indexer_canon_paths():
 
 
 @pytest.mark.slow
-@pytest.mark.skipif(not Path("../pytorch").exists(), reason="PyTorch repo not available")
+@pytest.mark.skipif(
+    not Path("../pytorch").exists(), reason="PyTorch repo not available"
+)
 def test_build_index_smoke(tmp_path):
     """Smoke test for building index on real repo (slow - full PyTorch indexing)"""
     from torchtalk.indexing import GraphEnhancedIndexer
@@ -54,10 +58,7 @@ def test_metadata_defaults():
 
     # Create a mock node
     node = TextNode(text="test code")
-    node.metadata = {
-        "rel_path": "test.py",
-        "file_path": "/abs/path/test.py"
-    }
+    node.metadata = {"rel_path": "test.py", "file_path": "/abs/path/test.py"}
 
     # Apply defaults like the indexer does (JSON strings for LanceDB compatibility)
     node.metadata.setdefault("schema", "tt_graph_meta_v1")
@@ -99,7 +100,9 @@ def test_language_detection():
         else:
             lang = "unknown"
 
-        assert lang == expected_lang, f"Failed for {file_path}: expected {expected_lang}, got {lang}"
+        assert lang == expected_lang, (
+            f"Failed for {file_path}: expected {expected_lang}, got {lang}"
+        )
 
 
 def test_line_number_computation(tmp_path):
@@ -127,7 +130,7 @@ def test_line_number_computation(tmp_path):
     # Index 0-47 (including newline at 47)
     node1 = TextNode(
         text="def foo():\n    x = 1\n    y = 2\n    return x + y\n",
-        metadata={"file_path": str(test_file)}
+        metadata={"file_path": str(test_file)},
     )
     node1.start_char_idx = 0
     node1.end_char_idx = 47  # End after "return x + y\n"
@@ -143,8 +146,7 @@ def test_line_number_computation(tmp_path):
     # Content: "def bar():\n    return 42\n"
     # Index 49-73
     node2 = TextNode(
-        text="def bar():\n    return 42\n",
-        metadata={"file_path": str(test_file)}
+        text="def bar():\n    return 42\n", metadata={"file_path": str(test_file)}
     )
     node2.start_char_idx = 49  # Start of "def bar"
     node2.end_char_idx = 73  # End of file
@@ -164,10 +166,7 @@ def test_line_numbers_no_char_idx():
 
     indexer = GraphEnhancedIndexer(repo_path="/tmp")
 
-    node = TextNode(
-        text="some code",
-        metadata={"file_path": "/tmp/test.py"}
-    )
+    node = TextNode(text="some code", metadata={"file_path": "/tmp/test.py"})
     # Don't set start_char_idx or end_char_idx
 
     cache = {}

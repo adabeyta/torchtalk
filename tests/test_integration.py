@@ -31,15 +31,11 @@ def test_cross_language_matmul_question(conversation_engine):
 def test_follow_up_question(conversation_engine):
     """Test that follow-up questions maintain context"""
     # First question
-    response1 = conversation_engine.chat(
-        "What is torch.nn.Module?"
-    )
+    response1 = conversation_engine.chat("What is torch.nn.Module?")
     assert len(response1) > 50
 
     # Follow-up without explicit context
-    response2 = conversation_engine.chat(
-        "Can you show me an example of how to use it?"
-    )
+    response2 = conversation_engine.chat("Can you show me an example of how to use it?")
     assert len(response2) > 50
 
     # Verify history was maintained

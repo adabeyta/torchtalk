@@ -22,7 +22,7 @@ from urllib.parse import urlparse
 
 # Resolve paths relative to package, not cwd
 PKG_ROOT = Path(__file__).resolve().parent
-VLLM_LAUNCHER = (PKG_ROOT.parent / "scripts" / "start_vllm_server.py").resolve()
+VLLM_LAUNCHER = (PKG_ROOT / "vllm_launcher.py").resolve()
 
 log = logging.getLogger(__name__)
 
@@ -41,7 +41,9 @@ def cmd_index(args):
     log.info(f"Building index for {repo_path}")
     log.info(f"Output directory: {output_dir}")
     if args.property_graph:
-        log.info("Using PropertyGraphIndex with graph traversal (recommended for cross-language tracing)")
+        log.info(
+            "Using PropertyGraphIndex with graph traversal (recommended for cross-language tracing)"
+        )
     else:
         log.info("Using VectorStoreIndex (add --property-graph for graph traversal)")
 
@@ -99,12 +101,18 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
     log.info("This may take 1-3 minutes for model loading and compilation...")
 
     vllm_cmd = [
-        sys.executable, str(VLLM_LAUNCHER),
-        "--model", args.model,
-        "--max-len", str(args.max_len),
-        "--host", args.host,
-        "--gpu-util", str(args.gpu_util),
-        "--tp", str(args.tp),
+        sys.executable,
+        str(VLLM_LAUNCHER),
+        "--model",
+        args.model,
+        "--max-len",
+        str(args.max_len),
+        "--host",
+        args.host,
+        "--gpu-util",
+        str(args.gpu_util),
+        "--tp",
+        str(args.tp),
     ]
 
     if args.attention_backend:
@@ -138,9 +146,7 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
                     sys.stdout.flush()
 
         log_thread = threading.Thread(
-            target=_stream_logs,
-            args=(vllm_process,),
-            daemon=True
+            target=_stream_logs, args=(vllm_process,), daemon=True
         )
         log_thread.start()
 
@@ -160,7 +166,9 @@ def _start_or_attach_vllm(vllm_url: str, args) -> tuple:
 
         # Wait for vLLM to be ready (poll health endpoint)
         log.info("Waiting for vLLM server to be ready...")
-        max_wait = 600  # 600 seconds (torch.compile + large TP can take time on first run)
+        max_wait = (
+            600  # 600 seconds (torch.compile + large TP can take time on first run)
+        )
         step = 1
         waited = 0
         while waited < max_wait:
@@ -210,10 +218,10 @@ def cmd_chat(args):
 
     # Share link warning
     if args.share:
-        log.warning("\n" + "!"*60)
+        log.warning("\n" + "!" * 60)
         log.warning("WARNING: --share creates a PUBLIC URL accessible by anyone!")
         log.warning("Do not share sensitive code or data.")
-        log.warning("!"*60 + "\n")
+        log.warning("!" * 60 + "\n")
 
     # Launch Gradio UI
     log.info("Starting Gradio UI...")
@@ -251,20 +259,20 @@ def cmd_chat(args):
         share_url = getattr(launch_result, "share_url", None) if args.share else None
 
     # Print stable, logged URLs
-    log.info(f"\n{'='*60}")
+    log.info(f"\n{'=' * 60}")
     log.info("TorchTalk is ready!")
-    log.info(f"{'='*60}")
+    log.info(f"{'=' * 60}")
     log.info(f"Chat UI (local): {local_url or f'http://localhost:{args.port}'}")
     if args.share and share_url:
         log.info(f"Share URL: {share_url}")
     log.info(f"vLLM API: {vllm_url}")
     log.info(f"Index: {index_path}")
-    log.info(f"{'='*60}\n")
+    log.info(f"{'=' * 60}\n")
 
     # Keep the main thread alive
     try:
         # Use the app's internal server to block
-        if hasattr(gradio_app, 'block_thread'):
+        if hasattr(gradio_app, "block_thread"):
             gradio_app.block_thread()
         else:
             # Fallback: just keep the main thread alive
@@ -279,13 +287,20 @@ def cmd_chat(args):
 def cmd_serve_vllm(args):
     """Start vLLM server only"""
     cmd = [
-        sys.executable, str(VLLM_LAUNCHER),
-        "--model", args.model,
-        "--max-len", str(args.max_len),
-        "--port", str(args.port),
-        "--host", args.host,
-        "--gpu-util", str(args.gpu_util),
-        "--tp", str(args.tp),
+        sys.executable,
+        str(VLLM_LAUNCHER),
+        "--model",
+        args.model,
+        "--max-len",
+        str(args.max_len),
+        "--port",
+        str(args.port),
+        "--host",
+        args.host,
+        "--gpu-util",
+        str(args.gpu_util),
+        "--tp",
+        str(args.tp),
     ]
 
     if args.attention_backend:
@@ -304,7 +319,7 @@ def main():
     """Main CLI entry point"""
     parser = argparse.ArgumentParser(
         prog="torchtalk",
-        description="TorchTalk - PyTorch codebase chatbot with cross-language tracing"
+        description="TorchTalk - PyTorch codebase chatbot with cross-language tracing",
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -312,57 +327,78 @@ def main():
     # Index command
     parser_index = subparsers.add_parser("index", help="Build index for a repository")
     parser_index.add_argument("repo_path", help="Path to repository")
-    parser_index.add_argument("--output", "-o", help="Output directory (default: ./index)")
     parser_index.add_argument(
-        "--property-graph", "-g",
+        "--output", "-o", help="Output directory (default: ./index)"
+    )
+    parser_index.add_argument(
+        "--property-graph",
+        "-g",
         action="store_true",
-        help="Use PropertyGraphIndex with graph traversal (recommended for cross-language tracing)"
+        help="Use PropertyGraphIndex with graph traversal (recommended for cross-language tracing)",
     )
     parser_index.add_argument(
         "--lancedb",
         action="store_true",
-        help="Use LanceDB for vector storage with native hybrid BM25+vector search"
+        help="Use LanceDB for vector storage with native hybrid BM25+vector search",
     )
     parser_index.add_argument(
         "--neo4j-uri",
-        help="Neo4j connection URI (e.g., bolt://localhost:7687) for graph storage"
+        help="Neo4j connection URI (e.g., bolt://localhost:7687) for graph storage",
     )
     parser_index.add_argument(
-        "--neo4j-user",
-        default="neo4j",
-        help="Neo4j username (default: neo4j)"
+        "--neo4j-user", default="neo4j", help="Neo4j username (default: neo4j)"
     )
-    parser_index.add_argument(
-        "--neo4j-password",
-        default="",
-        help="Neo4j password"
-    )
+    parser_index.add_argument("--neo4j-password", default="", help="Neo4j password")
     parser_index.set_defaults(func=cmd_index)
 
     parser_chat = subparsers.add_parser("chat", help="Start chat interface")
     parser_chat.add_argument("--index", "-i", help="Index path (default: ./index)")
-    parser_chat.add_argument("--vllm-server", default="http://localhost:8000", help="vLLM server URL")
-    parser_chat.add_argument("--model", default="meta-llama/llama-4-maverick", help="Model to serve")
-    parser_chat.add_argument("--max-len", type=int, default=1000000, help="Max context length")
+    parser_chat.add_argument(
+        "--vllm-server", default="http://localhost:8000", help="vLLM server URL"
+    )
+    parser_chat.add_argument(
+        "--model", default="meta-llama/llama-4-maverick", help="Model to serve"
+    )
+    parser_chat.add_argument(
+        "--max-len", type=int, default=1000000, help="Max context length"
+    )
     parser_chat.add_argument("--host", default="0.0.0.0", help="vLLM server host")
-    parser_chat.add_argument("--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)")
+    parser_chat.add_argument(
+        "--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)"
+    )
     parser_chat.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
-    parser_chat.add_argument("--attention-backend", default="", help="Attention backend")
-    parser_chat.add_argument("--served-model-name", default="", help="Served model name")
+    parser_chat.add_argument(
+        "--attention-backend", default="", help="Attention backend"
+    )
+    parser_chat.add_argument(
+        "--served-model-name", default="", help="Served model name"
+    )
     parser_chat.add_argument("--vllm-log-level", default="", help="vLLM log level")
     parser_chat.add_argument("--port", type=int, default=7860, help="Gradio port")
-    parser_chat.add_argument("--share", action="store_true", help="Create public share link")
+    parser_chat.add_argument(
+        "--share", action="store_true", help="Create public share link"
+    )
     parser_chat.set_defaults(func=cmd_chat)
 
     parser_vllm = subparsers.add_parser("serve-vllm", help="Start vLLM server only")
-    parser_vllm.add_argument("--model", default="meta-llama/llama-4-maverick", help="Model name")
-    parser_vllm.add_argument("--max-len", type=int, default=1000000, help="Max context length")
+    parser_vllm.add_argument(
+        "--model", default="meta-llama/llama-4-maverick", help="Model name"
+    )
+    parser_vllm.add_argument(
+        "--max-len", type=int, default=1000000, help="Max context length"
+    )
     parser_vllm.add_argument("--port", type=int, default=8000, help="Server port")
     parser_vllm.add_argument("--host", default="0.0.0.0", help="Server host")
-    parser_vllm.add_argument("--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)")
+    parser_vllm.add_argument(
+        "--gpu-util", type=float, default=0.9, help="GPU memory utilization (0-1)"
+    )
     parser_vllm.add_argument("--tp", type=int, default=1, help="Tensor parallel size")
-    parser_vllm.add_argument("--attention-backend", default="", help="Attention backend")
-    parser_vllm.add_argument("--served-model-name", default="", help="Served model name")
+    parser_vllm.add_argument(
+        "--attention-backend", default="", help="Attention backend"
+    )
+    parser_vllm.add_argument(
+        "--served-model-name", default="", help="Served model name"
+    )
     parser_vllm.add_argument("--vllm-log-level", default="", help="vLLM log level")
     parser_vllm.set_defaults(func=cmd_serve_vllm)
 
@@ -371,7 +407,7 @@ def main():
     # Setup logging with colorized output
     logging.basicConfig(
         level=logging.INFO,
-        format="%(asctime)s - \033[92m%(levelname)s\033[0m - %(message)s"
+        format="%(asctime)s - \033[92m%(levelname)s\033[0m - %(message)s",
     )
 
     if not args.command:

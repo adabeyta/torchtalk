@@ -1,4 +1,4 @@
 from torchtalk.engine.conversation_engine import ConversationEngine
-from torchtalk.engine.postprocessed_retriever import PostprocessedRetriever
+from torchtalk.engine.graph_expanded_retriever import GraphExpandedRetriever
 
-__all__ = ["ConversationEngine", "PostprocessedRetriever"]
+__all__ = ["ConversationEngine", "GraphExpandedRetriever"]

@@ -9,6 +9,7 @@ def test_app_import():
     # Add app.py directory to path
     sys.path.insert(0, str(Path(__file__).parent.parent))
     import app
+
     assert app is not None
 
 
@@ -21,9 +22,9 @@ def test_create_app_signature():
     sig = inspect.signature(app.create_app)
     params = list(sig.parameters.keys())
 
-    assert 'index_path' in params
-    assert 'vllm_server' in params
-    assert 'model_name' in params
+    assert "index_path" in params
+    assert "vllm_server" in params
+    assert "model_name" in params
 
 
 def test_chat_fn_shape():
@@ -84,14 +85,13 @@ def test_app_launch(mock_index_path, vllm_server_url):
 
     # Create app (don't launch)
     test_app = app.create_app(
-        index_path=str(mock_index_path),
-        vllm_server=vllm_server_url
+        index_path=str(mock_index_path), vllm_server=vllm_server_url
     )
 
     assert test_app is not None
     # Verify it's a Gradio Blocks instance
-    assert hasattr(test_app, 'queue')
-    assert hasattr(test_app, 'launch')
+    assert hasattr(test_app, "queue")
+    assert hasattr(test_app, "launch")
 
 
 def test_main_missing_index(tmp_path):
@@ -100,7 +100,7 @@ def test_main_missing_index(tmp_path):
     import app
 
     # Mock sys.argv
-    with patch('sys.argv', ['app.py', '--index-path', str(tmp_path / 'nonexistent')]):
+    with patch("sys.argv", ["app.py", "--index-path", str(tmp_path / "nonexistent")]):
         with pytest.raises(SystemExit) as exc_info:
             app.main()
         assert exc_info.value.code == 1
@@ -111,6 +111,7 @@ def test_main_missing_index(tmp_path):
 def mock_index_path(tmp_path):
     """Path to test index"""
     import os
+
     test_index = os.getenv("TEST_INDEX_PATH")
     if test_index:
         return Path(test_index)
@@ -121,6 +122,7 @@ def mock_index_path(tmp_path):
 def vllm_server_url():
     """vLLM server URL for integration tests"""
     import os
+
     return os.getenv("VLLM_SERVER_URL", "http://localhost:8000")
 
 
