@@ -1,6 +1,14 @@
+"""
+TorchTalk - Cross-language binding analysis for PyTorch codebases.
 
-__version__ = "2.0.0"
+Provides MCP tools for Claude Code to understand PyTorch's
+Python → C++ → CUDA dispatch architecture.
+"""
+
+__version__ = "3.0.0"
 __author__ = "Adrian Abeyta"
 
-# Simplified for v2.0 rewrite
-__all__ = []
+from torchtalk.analysis.binding_detector import BindingDetector
+from torchtalk.analysis.repo_analyzer import RepoAnalyzer
+
+__all__ = ["BindingDetector", "RepoAnalyzer"]
