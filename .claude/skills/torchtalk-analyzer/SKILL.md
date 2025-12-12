@@ -1,98 +1,134 @@
 ---
 name: torchtalk-analyzer
 description: Get cross-language binding information for PyTorch codebases (Python → C++ → CUDA). Use when you need to understand dispatch paths, find backend implementations (CPU/CUDA), trace CUDA kernels, or understand how Python APIs connect to native code. Provides structural architectural data, not code search.
-allowed-tools: mcp__torchtalk__get_binding_chain, mcp__torchtalk__get_dispatch_implementations, mcp__torchtalk__get_cuda_kernels, mcp__torchtalk__get_implementation_files, mcp__torchtalk__get_call_graph, mcp__torchtalk__list_binding_types, mcp__torchtalk__search_bindings, Read, Grep, Glob
+allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__get_binding_chain, mcp__torchtalk__get_native_function, mcp__torchtalk__get_dispatch_implementations, mcp__torchtalk__get_cpp_callers, mcp__torchtalk__get_cpp_callees, mcp__torchtalk__get_cuda_kernels, mcp__torchtalk__search_bindings, Read, Grep, Glob
 ---
 
 # TorchTalk Cross-Language Binding Analyzer
 
-## What This Provides
+## When to Use This Skill
 
-Structural knowledge about PyTorch-style codebases:
-- **Binding chains**: Python API → C++ implementation → file location
-- **Dispatch keys**: CPU, CUDA, Meta backend implementations
-- **CUDA kernels**: `__global__` functions and what calls them
-- **Call graphs**: Function relationships
+Use TorchTalk when asked about:
+- How a PyTorch function works internally
+- What would break if something is modified (impact analysis)
+- Where a function is implemented (Python/C++/CUDA)
+- How Python APIs connect to native code
 
-## Available Tools
+## Quick Start: Check Status First
 
-### Primary Tools
+If unsure what's available, start with:
+```
+get_status()
+```
+This shows what's loaded and any setup needed.
 
-#### `get_binding_chain(function_name)`
-Get the full Python → C++ → CUDA mapping, grouped by backend.
+## Primary Tools
+
+### `get_binding_chain(function_name)`
+**Use for:** "How does X work?" / "Where is X implemented?"
+
+Shows complete Python → C++ → file mapping with dispatch configuration.
 
 ```
 get_binding_chain("matmul")
-→ CPU: at::native::matmul_cpu → LinearAlgebra.cpp
-→ CUDA: at::native::matmul_cuda → Blas.cu
+→ Native function definition from native_functions.yaml
+→ Dispatch: CompositeImplicitAutograd → matmul
+→ Implementation: aten/src/ATen/native/LinearAlgebra.cpp:1996
 ```
 
-#### `get_dispatch_implementations(function_name)`
-Table showing all backend implementations.
+### `get_cpp_callers(function_name)` ⭐ Impact Analysis
+**Use for:** "What would break if I change X?" / "What depends on X?"
+
+Shows all C++ functions that call the target function.
 
 ```
-get_dispatch_implementations("add")
-→ | CPU | at::native::add | Add.cpp |
-→ | CUDA | at::native::add_cuda | Add.cu |
+get_cpp_callers("gemm")
+→ gemm is called by:
+  - at::native::cpublas::brgemm at CPUBlas.cpp:1347
+  - at::native::addmm at LinearAlgebra.cpp:892
 ```
 
-#### `get_cuda_kernels(function_name)`
-Find CUDA `__global__` kernels and what C++ functions launch them.
+### `get_cpp_callees(function_name)` ⭐ Dependency Analysis
+**Use for:** "What does X call internally?" / "What are X's dependencies?"
 
-#### `get_implementation_files(function_name)`
-Get just file paths, organized by type (bindings, C++ impl, CUDA).
+Shows what a function calls.
 
-### Secondary Tools
+```
+get_cpp_callees("_matmul_impl")
+→ _matmul_impl calls:
+  - at::Tensor::mm
+  - at::Tensor::mv
+  - at::Tensor::dot
+  - at::Tensor::squeeze
+```
 
-#### `get_call_graph(function_name)`
-See what calls a function and what it calls.
+### `get_native_function(function_name)`
+**Use for:** Official operator definition from native_functions.yaml
 
-#### `list_binding_types()`
-Summary of all binding types (pybind, torch_library, cuda_kernel, etc.)
+Shows authoritative signature, dispatch config, and backward formula.
 
-#### `search_bindings(query)`
+### `get_dispatch_implementations(function_name)`
+**Use for:** "Which backend (CPU/CUDA) handles X?"
+
+Table of all backend implementations with file locations.
+
+### `get_cuda_kernels(function_name)`
+**Use for:** "What GPU kernels does X use?"
+
+Shows `__global__` CUDA kernels and what launches them.
+
+### `search_bindings(query)`
+**Use for:** "Find functions related to X"
+
 Search all bindings by name.
 
-## Detected Binding Patterns
+## Workflow Examples
 
-| Pattern | Description |
-|---------|-------------|
-| `pybind_function` | `m.def("name", &func)` |
-| `pybind_class` | `py::class_<Cpp>(m, "Py")` |
-| `torch_library` | `TORCH_LIBRARY(ns, m)` |
-| `torch_library_impl` | `TORCH_LIBRARY_IMPL(ns, CUDA, m)` |
-| `cuda_kernel` | `__global__ void kernel(...)` |
-| `at_dispatch` | `AT_DISPATCH_FLOATING_TYPES(...)` |
-
-## Workflow Example
-
-**User asks:** "How does torch.matmul work on GPU?"
+### Example 1: "How does torch.matmul work?"
 
 1. Get the binding chain:
    ```
    get_binding_chain("matmul")
    ```
-   → Shows CPU and CUDA implementations with file paths
-
-2. Get CUDA kernels:
+2. Get internal calls:
    ```
-   get_cuda_kernels("matmul")
+   get_cpp_callees("matmul")
    ```
-   → Shows `__global__` functions involved
+3. Read the implementation file shown in results
+4. Answer with specific code references
 
-3. Read the implementation:
+### Example 2: "What would break if I modify the GEMM implementation?"
+
+1. Find callers:
    ```
-   Read the CUDA file from step 1
+   get_cpp_callers("gemm")
    ```
+2. For each caller, check what it does:
+   ```
+   get_binding_chain("addmm")  # if addmm calls gemm
+   ```
+3. Explain the impact chain
 
-4. Answer with specific file references and code
+### Example 3: "Where is conv2d implemented for CUDA?"
 
-## Why This Helps
+1. Get dispatch implementations:
+   ```
+   get_dispatch_implementations("conv2d")
+   ```
+2. Look for CUDA dispatch key in results
+3. Read the CUDA file
 
-Claude knows PyTorch conceptually. TorchTalk provides:
-- **Exact file paths** for this codebase version
-- **Dispatch key mappings** (which backend handles what)
-- **CUDA kernel locations** (not exposed in Python docs)
-- **pybind11/TORCH_LIBRARY binding sites**
+## Tool Status
 
-This architectural map enables precise answers with real code references.
+Some tools require `compile_commands.json` (generated by building PyTorch):
+
+| Tool | Requires Build? | Purpose |
+|------|----------------|---------|
+| `get_binding_chain` | No | Python→C++ mapping |
+| `get_native_function` | No | Operator definitions |
+| `get_dispatch_implementations` | No | Backend routing |
+| `get_cuda_kernels` | No | GPU kernels |
+| `get_cpp_callers` | **Yes** | Impact analysis |
+| `get_cpp_callees` | **Yes** | Dependency tracing |
+
+If `get_cpp_callers`/`get_cpp_callees` return "not available", the user needs to build PyTorch once. Use `get_status()` for guidance.

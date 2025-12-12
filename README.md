@@ -1,156 +1,106 @@
 # TorchTalk
 
-A PyTorch codebase chatbot with cross-language tracing (Python ↔ C++ ↔ CUDA) powered by graph-enhanced retrieval and 1M context windows.
+An MCP server that gives Claude Code deep understanding of PyTorch's cross-language architecture (Python → C++ → CUDA).
 
-## Features
+## What It Does
 
-- **Cross-language binding detection**: Automatically discovers pybind11 bindings between Python, C++, and CUDA
-- **Graph-enhanced retrieval**: Indexes call graphs, import graphs, and cross-language relationships
-- **Conversation memory**: Automatic follow-up question handling with context
-- **1M context window support**: Uses vLLM with Llama 4 Maverick for long-context understanding
-- **Minimal dependencies**: Built on open-source tools (LlamaIndex, vLLM, Gradio)
+TorchTalk provides **structural knowledge** that Claude can't get from just reading code:
+
+- **Binding chains**: Trace `torch.matmul` → `at::native::matmul` → `LinearAlgebra.cpp:1996`
+- **Impact analysis**: "If I modify GEMM, what breaks?" → Shows all 15 callers with file:line
+- **Dispatch mapping**: Which backend (CPU/CUDA/MPS) handles each operation
+- **Call graphs**: 60,000+ C++ functions, 139,000+ call edges
 
 ## Quick Start
 
-### 1. Install
-
 ```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Install torchtalk CLI
+# Install
 pip install -e .
+
+# Add to Claude Code (one command)
+claude mcp add torchtalk -s user -- torchtalk mcp-serve --pytorch-source /path/to/pytorch
 ```
 
-### 2. Build Index (One-time setup)
+That's it. Claude Code now has access to PyTorch's cross-language bindings.
 
-```bash
-# Index the PyTorch repository (or any Python/C++/CUDA codebase)
-torchtalk index /path/to/pytorch --output ./index
-```
+## Requirements
 
-This will:
-- Detect cross-language bindings
-- Build call and import graphs
-- Create vector embeddings with graph metadata
-- Persist to `./index/`
+- **Python 3.10+**
+- **PyTorch source code**: `git clone https://github.com/pytorch/pytorch`
+- **compile_commands.json** (optional): For full C++ call graph, build PyTorch once:
+  ```bash
+  cd /path/to/pytorch && python setup.py develop
+  ```
 
-### 3. Start Chatting (One command!)
+## Available Tools
 
-```bash
-# Automatically starts vLLM + Gradio UI
-torchtalk chat --index ./index
-```
+| Tool | Description |
+|------|-------------|
+| `get_binding_chain(func)` | Full Python → C++ → file mapping |
+| `get_native_function(func)` | Definition from native_functions.yaml |
+| `get_dispatch_implementations(func)` | Backend implementations (CPU, CUDA, etc.) |
+| `get_cpp_callees(func)` | What does this function call? |
+| `get_cpp_callers(func)` | What calls this function? (impact analysis) |
+| `get_cuda_kernels(func)` | CUDA kernel information |
+| `search_bindings(query)` | Search all bindings by name |
 
-That's it! Visit http://localhost:7860 to start chatting.
-
-The `chat` command will:
-- Check if vLLM is already running at http://localhost:8000
-- If not, automatically launch it with sensible defaults
-- Stream vLLM logs to console for debugging
-- Launch Gradio UI at http://localhost:7860
-- Gracefully shutdown both services on Ctrl+C
-
-### Advanced Usage
-
-```bash
-# Use a different model
-torchtalk chat --index ./index --model meta-llama/llama-4-maverick
-
-# Configure GPU usage
-torchtalk chat --index ./index --tp 2 --gpu-util 0.85 --cuda-devices "0,1"
-
-# Adjust context length
-torchtalk chat --index ./index --max-len 500000
-
-# Create a public share link
-torchtalk chat --index ./index --share
-
-# Start vLLM server only (without UI)
-torchtalk serve-vllm --model meta-llama/llama-4-maverick --port 8000
-
-# See all available options
-torchtalk chat --help
-torchtalk serve-vllm --help
-```
-
-## Architecture
+## Example Usage
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                       Indexing                               │
-│  ┌──────────────┐   ┌──────────────┐   ┌──────────────┐    │
-│  │ Binding      │   │ Call Graph   │   │ Import Graph │    │
-│  │ Detector     │   │ Builder      │   │ Builder      │    │
-│  └──────┬───────┘   └──────┬───────┘   └──────┬───────┘    │
-│         │                  │                   │             │
-│         └──────────────────┴───────────────────┘             │
-│                            │                                 │
-│                  ┌─────────▼──────────┐                      │
-│                  │ Graph-Enhanced     │                      │
-│                  │ Indexer            │                      │
-│                  │ (LlamaIndex)       │                      │
-│                  └─────────┬──────────┘                      │
-│                            │                                 │
-│                  ┌─────────▼──────────┐                      │
-│                  │ Vector Store       │                      │
-│                  │ (ChromaDB)         │                      │
-│                  └────────────────────┘                      │
-└─────────────────────────────────────────────────────────────┘
+You: "What would break if I changed the GEMM implementation?"
 
-┌─────────────────────────────────────────────────────────────┐
-│                    vLLM Server                               │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ vLLM (Llama 4 Maverick, 1M context)                 │   │
-│  │ - KV cache paging                                    │   │
-│  │ - Prefix caching                                     │   │
-│  │ - Chunked prefill                                    │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+Claude uses get_cpp_callers("gemm") →
+  gemm is called by:
+  - at::native::cpublas::brgemm at CPUBlas.cpp:1347
 
-┌─────────────────────────────────────────────────────────────┐
-│              Conversation Engine                             │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ CondensePlusContextChatEngine (LlamaIndex)          │   │
-│  │ - Automatic query condensation for follow-ups       │   │
-│  │ - ChatMemoryBuffer for conversation state           │   │
-│  │ - Retrieval from graph-enhanced index               │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+You: "How does torch.matmul work internally?"
 
-┌─────────────────────────────────────────────────────────────┐
-│                      Gradio UI                               │
-│  ┌──────────────────────────────────────────────────────┐   │
-│  │ Minimal chat interface with:                        │   │
-│  │ - Message history                                    │   │
-│  │ - Example questions                                  │   │
-│  │ - Clear/reset button                                 │   │
-│  └──────────────────────────────────────────────────────┘   │
-└─────────────────────────────────────────────────────────────┘
+Claude uses get_binding_chain("matmul") + get_cpp_callees("matmul") →
+  matmul → _matmul_impl → mm, mv, dot, squeeze, unsqueeze...
 ```
+
+## Performance
+
+| Scenario | Time |
+|----------|------|
+| First startup | ~0.3s (C++ call graph builds in background) |
+| Background build | ~90s (60K functions, 139K edges) |
+| Cached startup | ~0.5s |
 
 ## Project Structure
 
 ```
 torchtalk/
-├── app.py                      # Gradio UI entry point
-├── scripts/
-│   └── start_vllm_server.py    # vLLM launcher with preflight checks
-├── torchtalk/
-│   ├── analysis/               # Code analysis (bindings, graphs)
-│   │   ├── binding_detector.py
-│   │   └── repo_analyzer.py
-│   ├── engine/
-│   │   └── conversation_engine.py  # LlamaIndex chat engine
-│   └── indexing/
-│       └── graph_enhanced_indexer.py  # Graph metadata injection
-└── tests/                      # Unit and integration tests
+├── src/torchtalk/
+│   ├── server.py          # MCP server implementation
+│   ├── cli.py             # CLI entry point
+│   └── analysis/          # Code analysis modules
+│       ├── binding_detector.py   # pybind11/TORCH_LIBRARY detection
+│       ├── cpp_call_graph.py     # libclang-based call graph
+│       └── repo_analyzer.py      # Python AST analysis
+├── .claude/
+│   ├── commands/trace.md         # /trace slash command
+│   └── skills/.../SKILL.md       # Skill definition
+├── .mcp.json              # MCP server config
+├── CLAUDE.md              # Project context
+└── pyproject.toml         # Package config
 ```
 
-## Credits
+## How It Works
 
-Built with:
-- [LlamaIndex](https://www.llamaindex.ai/) - Retrieval framework
-- [vLLM](https://github.com/vllm-project/vllm) - Fast LLM inference
-- [Gradio](https://www.gradio.app/) - ML web interfaces
-- [tree-sitter](https://tree-sitter.github.io/tree-sitter/) - Multi-language parsing
+1. **On first run**: Parses `native_functions.yaml`, detects pybind11 bindings, builds C++ call graph
+2. **Caches everything**: Subsequent startups load from `~/.cache/torchtalk/` (~0.5s)
+3. **Background building**: C++ call graph builds in background, tools work immediately
+
+## Development
+
+```bash
+# Install with dev dependencies
+pip install -e ".[dev]"
+
+# Run tests
+pytest
+
+# Run MCP server directly
+python -m torchtalk mcp-serve --pytorch-source /path/to/pytorch
+```

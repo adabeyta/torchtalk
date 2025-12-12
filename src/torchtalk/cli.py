@@ -11,19 +11,18 @@ The MCP server automatically builds and caches the binding index on first run.
 import argparse
 import logging
 import sys
-from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 
 def cmd_mcp_serve(args):
     """Start MCP server for Claude Code integration"""
-    from torchtalk.mcp_server import run_server
+    from torchtalk.server import run_server
 
     run_server(
         pytorch_source=args.pytorch_source,
         index_path=args.index,
-        transport=args.transport
+        transport=args.transport,
     )
     return 0
 
@@ -52,7 +51,7 @@ Examples:
 
   # Use pre-built index
   torchtalk mcp-serve --index ./pytorch_index
-        """
+        """,
     )
 
     subparsers = parser.add_subparsers(dest="command", help="Commands")
@@ -65,33 +64,29 @@ Examples:
         epilog="""
 The server automatically builds and caches the binding index.
 First run takes a few minutes; subsequent runs are instant.
-        """
+        """,
     )
     parser_mcp.add_argument(
-        "--pytorch-source", "-p",
-        help="Path to PyTorch source code (auto-builds and caches index)"
+        "--pytorch-source",
+        "-p",
+        help="Path to PyTorch source code (auto-builds and caches index)",
     )
     parser_mcp.add_argument(
-        "--index", "-i",
-        help="Path to existing bindings.json or index directory"
+        "--index", "-i", help="Path to existing bindings.json or index directory"
     )
     parser_mcp.add_argument(
         "--transport",
         default="stdio",
         choices=["stdio", "streamable-http"],
-        help="MCP transport type (default: stdio for Claude Code)"
+        help="MCP transport type (default: stdio for Claude Code)",
     )
-    parser_mcp.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging"
-    )
+    parser_mcp.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser_mcp.set_defaults(func=cmd_mcp_serve)
 
     args = parser.parse_args()
 
     # Setup logging
-    log_level = logging.DEBUG if getattr(args, 'debug', False) else logging.INFO
+    log_level = logging.DEBUG if getattr(args, "debug", False) else logging.INFO
     logging.basicConfig(
         level=log_level,
         format="%(asctime)s - %(levelname)s - %(message)s",

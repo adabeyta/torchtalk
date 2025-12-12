@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "torchtalk"
+version = "3.0.0"
+description = "MCP server providing cross-language binding analysis for PyTorch codebases (Python/C++/CUDA)"
+readme = "README.md"
+# license = "MIT"  # Add when ready to publish
+requires-python = ">=3.10"
+authors = [
+    { name = "Adrian Abeyta", email = "aabeyta@redhat.com" }
+]
+keywords = [
+    "pytorch",
+    "mcp",
+    "claude",
+    "code-analysis",
+    "cross-language",
+    "bindings",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Code Generators",
+]
+dependencies = [
+    "networkx>=3.0",
+    "tree-sitter>=0.21.0",
+    "tree-sitter-language-pack>=0.6.0",
+    "pathspec>=0.12",
+    "pyyaml>=6.0",
+    "libclang>=16.0.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[project.scripts]
+torchtalk = "torchtalk.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/adabeyta/torchtalk"
+Repository = "https://github.com/adabeyta/torchtalk.git"
+Issues = "https://github.com/adabeyta/torchtalk/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/torchtalk"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
