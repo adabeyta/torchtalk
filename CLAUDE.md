@@ -63,13 +63,12 @@ All data cached to `~/.cache/torchtalk/`:
 
 | Tool | Description |
 |------|-------------|
-| `get_binding_chain(func)` | Full Python → C++ → file mapping |
-| `get_native_function(func)` | Definition from native_functions.yaml |
-| `get_dispatch_implementations(func)` | Backend implementations (CPU, CUDA) |
-| `get_cpp_callees(func)` | What does this function call? |
-| `get_cpp_callers(func)` | What calls this function? |
-| `get_cuda_kernels(func)` | CUDA kernel information |
-| `search_bindings(query)` | Search all bindings |
+| `trace(func, focus?)` | Python → YAML → C++ → file:line. Focus: "full", "yaml", "dispatch" |
+| `search(query, backend?)` | Find bindings by name with optional backend filter |
+| `impact(func, depth?)` | Transitive callers + Python entry points |
+| `calls(func)` | Outbound: functions `func` invokes |
+| `called_by(func)` | Inbound: functions that invoke `func` |
+| `cuda_kernels(func?)` | GPU kernel launches with file:line |
 
 ## Key Files
 

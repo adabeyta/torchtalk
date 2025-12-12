@@ -37,14 +37,10 @@ class ServerState:
     # Indexes
     by_python_name: Dict[str, List[Dict]] = field(default_factory=dict)
     by_cpp_name: Dict[str, List[Dict]] = field(default_factory=dict)
-    by_file: Dict[str, List[Dict]] = field(default_factory=dict)
     by_dispatch_key: Dict[str, List[Dict]] = field(default_factory=dict)
-    by_binding_type: Dict[str, List[Dict]] = field(default_factory=dict)
-    kernels_by_name: Dict[str, Dict] = field(default_factory=dict)
 
     # Paths
     pytorch_source: Optional[str] = None
-    index_path: Optional[str] = None
 
     # C++ call graph
     cpp_extractor: Any = None
@@ -53,12 +49,6 @@ class ServerState:
 
 
 _state = ServerState()
-
-
-def _reset_state():
-    """Reset server state."""
-    global _state
-    _state = ServerState()
 
 
 # =============================================================================
@@ -263,46 +253,32 @@ def _find_implementations(source: str, functions: Dict) -> Dict[str, List[Dict]]
     return impls
 
 
-def _grep_fallback(source: str, name: str) -> List[Dict]:
-    """Fallback grep search for function."""
-    import subprocess
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
 
-    src = Path(source)
-    search_dirs = [src / "aten/src/ATen/native", src / "torch/csrc"]
+    if len(s2) == 0:
+        return len(s1)
 
-    results = []
-    pattern = rf"\b{re.escape(name)}\s*\([^;]*\)\s*{{"
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
 
-    for search_dir in search_dirs:
-        if not search_dir.exists():
-            continue
+    return previous_row[-1]
 
-        try:
-            proc = subprocess.run(
-                ["grep", "-rn", "-E", pattern, "--include=*.cpp", str(search_dir)],
-                capture_output=True,
-                text=True,
-                timeout=10,
-            )
-            for line in proc.stdout.strip().split("\n")[:5]:
-                if ":" not in line:
-                    continue
-                parts = line.split(":", 2)
-                if len(parts) >= 2:
-                    results.append(
-                        {
-                            "function_name": name,
-                            "file_path": parts[0],
-                            "line_number": int(parts[1]) if parts[1].isdigit() else 0,
-                            "signature": (
-                                truncate(parts[2], 80) if len(parts) > 2 else ""
-                            ),
-                        }
-                    )
-        except Exception:
-            pass
 
-    return results
+def _safe_sort_key(item: Any) -> str:
+    """Sort key that handles None values (sorts None last)."""
+    if item is None:
+        return "\uffff"
+    return str(item) if not isinstance(item, str) else item
 
 
 def _fuzzy_find(name: str, data: Dict[str, Any]) -> Optional[List[Any]]:
@@ -323,6 +299,23 @@ def _fuzzy_find(name: str, data: Dict[str, Any]) -> Optional[List[Any]]:
         matches.sort(key=lambda x: len(x[0]))
         v = matches[0][1]
         return v if isinstance(v, list) else [v]
+
+    # Levenshtein distance match (for typos)
+    if len(name) >= 3:  # Only for names of reasonable length
+        candidates = []
+        for key in data:
+            # Only check keys of similar length (optimization)
+            if abs(len(key) - len(name)) <= 3:
+                dist = _levenshtein_distance(name_lower, key.lower())
+                # Accept if edit distance is <= 2 or <= 30% of string length
+                max_dist = max(2, len(name) // 3)
+                if dist <= max_dist:
+                    candidates.append((dist, key, data[key]))
+
+        if candidates:
+            candidates.sort(key=lambda x: x[0])  # Sort by distance
+            v = candidates[0][2]
+            return v if isinstance(v, list) else [v]
 
     return None
 
@@ -375,27 +368,12 @@ def _build_index(source: str) -> Dict[str, Any]:
 def _build_indexes(state: ServerState):
     """Build lookup indexes."""
     for binding in state.bindings:
-        py_name = binding.get("python_name", "")
-        cpp_name = binding.get("cpp_name", "")
-        file_path = binding.get("file_path", "")
-        dispatch = binding.get("dispatch_key", "")
-        btype = binding.get("binding_type", "")
-
-        if py_name:
+        if py_name := binding.get("python_name"):
             state.by_python_name.setdefault(py_name, []).append(binding)
-        if cpp_name:
+        if cpp_name := binding.get("cpp_name"):
             state.by_cpp_name.setdefault(cpp_name, []).append(binding)
-        if file_path:
-            state.by_file.setdefault(file_path, []).append(binding)
-        if dispatch:
+        if dispatch := binding.get("dispatch_key"):
             state.by_dispatch_key.setdefault(dispatch, []).append(binding)
-        if btype:
-            state.by_binding_type.setdefault(btype, []).append(binding)
-
-    for kernel in state.cuda_kernels:
-        name = kernel.get("name", "")
-        if name:
-            state.kernels_by_name[name] = kernel
 
 
 def _load_from_json(path: str):
@@ -529,7 +507,6 @@ def _init_from_source(source: str):
         _build_indexes(_state)
 
     _state.pytorch_source = str(src)
-    _state.index_path = str(src)
     _init_cpp_call_graph(str(src))
 
 
@@ -575,16 +552,56 @@ def _get_native_func(name: str) -> Optional[Dict]:
 
 
 def _similar_functions(name: str, limit: int = 10) -> List[str]:
-    """Find similar function names."""
+    """Find similar function names using substring match and Levenshtein distance."""
     name_lower = name.lower()
-    matches = [k for k in _state.native_functions if name_lower in k.lower()]
-    matches.sort(key=len)
-    return matches[:limit]
+    results = []  # (priority, length, name)
+
+    # Substring matches (priority 0)
+    substring_matches = {k for k in _state.native_functions if name_lower in k.lower()}
+    results.extend((0, len(m), m) for m in substring_matches)
+
+    # Levenshtein matches for typos (priority = distance)
+    if len(name) >= 3:
+        max_dist = max(3, len(name) // 2)
+        for key in _state.native_functions:
+            if key in substring_matches or abs(len(key) - len(name)) > 5:
+                continue
+            dist = _levenshtein_distance(name_lower, key.lower())
+            if dist <= max_dist:
+                results.append((dist, len(key), key))
+
+    # Sort by priority, then length; dedupe
+    results.sort(key=lambda x: (x[0], x[1]))
+    seen = set()
+    return [n for _, _, n in results if not (n in seen or seen.add(n))][:limit]
 
 
 def _rel_path(path: str) -> str:
     """Get relative path."""
     return relative_path(path, _state.pytorch_source)
+
+
+def _dedupe_by_key(items: List[Dict], key: str) -> List[Dict]:
+    """Deduplicate list of dicts by a key."""
+    seen = set()
+    result = []
+    for item in items:
+        if (val := item.get(key)) and val not in seen:
+            seen.add(val)
+            result.append(item)
+    return result
+
+
+def _format_call_item(
+    md: Markdown, item: Dict, name_key: str, file_key: str, line_key: str
+):
+    """Format a caller/callee item with optional file:line."""
+    name = item[name_key]
+    if file_path := item.get(file_key):
+        line = f":{item[line_key]}" if item.get(line_key) else ""
+        md.item(f"`{name}` → `{_rel_path(file_path)}{line}`")
+    else:
+        md.item(f"`{name}`")
 
 
 # =============================================================================
@@ -605,11 +622,18 @@ async def get_status() -> str:
         md.bold("PyTorch Source", "Not configured")
     md.blank()
 
-    # Data
+    # Data stats (folded in from list_binding_types)
     if _state.bindings:
         md.bold("Bindings", f"{len(_state.bindings):,} loaded")
         md.item(f"CUDA kernels: {len(_state.cuda_kernels):,}", 1)
         md.item(f"Dispatch keys: {len(_state.by_dispatch_key)}", 1)
+        # Top dispatch keys
+        if _state.by_dispatch_key:
+            top_keys = sorted(_state.by_dispatch_key.items(), key=lambda x: -len(x[1]))[
+                :5
+            ]
+            for key, bindings in top_keys:
+                md.item(f"{key}: {len(bindings)}", 2)
     else:
         md.bold("Bindings", "Not loaded")
     md.blank()
@@ -648,15 +672,14 @@ async def get_status() -> str:
     )
 
     md.table(
-        ["Tool", "Status", "Use For"],
+        ["Tool", "Status", "Description"],
         [
-            ["`get_binding_chain`", ready, "Python→C++ mapping"],
-            ["`get_native_function`", ready, "Operator definitions"],
-            ["`get_dispatch_implementations`", ready, "CPU/CUDA backends"],
-            ["`get_cuda_kernels`", ready, "GPU kernel info"],
-            ["`search_bindings`", ready, "Find functions"],
-            ["`get_cpp_callers`", cpp_ready, "Impact analysis"],
-            ["`get_cpp_callees`", cpp_ready, "Dependency tracing"],
+            ["`trace`", ready, "Python → C++ → file:line (full binding chain)"],
+            ["`search`", ready, "Find bindings by name, optional backend filter"],
+            ["`impact`", cpp_ready, "Transitive callers + Python entry points"],
+            ["`calls`", cpp_ready, "Functions this function invokes (outbound)"],
+            ["`called_by`", cpp_ready, "Functions that invoke this (inbound)"],
+            ["`cuda_kernels`", ready, "GPU kernel launches with locations"],
         ],
     )
 
@@ -664,225 +687,174 @@ async def get_status() -> str:
 
 
 @mcp.tool()
-async def get_binding_chain(function_name: str) -> str:
-    """Get Python → C++ → file mapping for a function."""
+async def trace(function_name: str, focus: str = "full") -> str:
+    """
+    Trace a PyTorch function from Python API to C++ implementation.
+
+    Args:
+        function_name: Function to trace (e.g., "add", "matmul", "softmax")
+        focus: Level of detail - "full" (default), "yaml" (definition only), "dispatch" (backends only)
+
+    Returns:
+        Binding chain with file:line locations for each layer.
+    """
     _ensure_loaded()
 
     md = Markdown()
-    md.h2(f"Binding chain for `{function_name}`")
+    md.h2(f"Trace: `{function_name}`")
 
-    # Native function definition
     native = _get_native_func(function_name)
-    if native:
-        md.h3("Native Function Definition (from native_functions.yaml)")
-        md.code("Name", native.get("name", function_name))
+    base_name = native.get("base_name", function_name) if native else function_name
+
+    # === YAML section (always shown for "full" and "yaml") ===
+    if focus in ("full", "yaml") and native:
+        md.h3("Definition (native_functions.yaml)")
         md.code("Signature", native.get("signature", "N/A"))
 
         if native.get("variants"):
             md.bold("Variants", native["variants"])
+        if native.get("structured"):
+            md.bold("Structured", "Yes")
+        if native.get("structured_delegate"):
+            md.bold("Delegate", native["structured_delegate"])
         if native.get("tags"):
             md.bold("Tags", ", ".join(str(t) for t in native["tags"]))
 
         dispatch = native.get("dispatch", {})
         if dispatch:
-            md.blank().text("**Dispatch Configuration:**")
-            for key, impl in sorted(dispatch.items()):
-                md.item(f"{key}: `{impl}`")
+            md.blank().text("**Dispatch Config:**")
+            # Safe sort handling None keys
+            for key, impl in sorted(
+                dispatch.items(), key=lambda x: _safe_sort_key(x[0])
+            ):
+                md.item(f"{key or 'default'}: `{impl}`")
         md.blank()
 
-    # Native implementations
-    base_name = native.get("base_name", function_name) if native else function_name
-    impls = []
-
-    if base_name in _state.native_implementations:
-        impls.extend(_state.native_implementations[base_name])
-    else:
-        found = _fuzzy_find(base_name, _state.native_implementations)
-        if found:
-            impls.extend(found)
-
-    # Also check dispatch targets
-    if native:
-        for impl_name in native.get("dispatch", {}).values():
-            if impl_name in _state.native_implementations:
-                impls.extend(_state.native_implementations[impl_name])
-
-    if impls:
-        md.h3("Native C++ Implementations")
-        md.text("*Hand-written implementations in aten/src/ATen/native/:*\n")
-
-        seen = set()
-        for impl in impls[:10]:
-            key = (
-                impl["function_name"],
-                impl.get("file_path"),
-                impl.get("line_number"),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-
-            md.code(impl["function_name"], "")
-            path = _rel_path(impl.get("file_path", ""))
-            line = impl.get("line_number", "")
-            md.item(f"File: `{path}:{line}`", 1)
-            if impl.get("signature"):
-                md.item(f"Signature: `{truncate(impl['signature'], 80)}`", 1)
+        # Derivative formula
+        deriv = _state.derivatives.get(function_name) or _state.derivatives.get(
+            base_name
+        )
+        if deriv and deriv.get("gradients"):
+            md.text("**Derivative:**")
+            for input_name, formula in deriv["gradients"].items():
+                md.item(f"`{input_name}`: `{truncate(formula, 60)}`")
             md.blank()
 
-    # Registered implementations (from binding detector)
-    bindings = _state.by_python_name.get(function_name, [])
-    if not bindings:
-        bindings = _state.by_cpp_name.get(function_name, [])
-    if not bindings:
-        found = _fuzzy_find(function_name, _state.by_python_name)
-        if found:
-            bindings = found
+    # === Dispatch section (always shown for "full" and "dispatch") ===
+    if focus in ("full", "dispatch"):
+        # From binding detector (TORCH_LIBRARY_IMPL registrations)
+        bindings = _state.by_python_name.get(function_name, [])
+        if not bindings:
+            bindings = _state.by_cpp_name.get(function_name, [])
+        if not bindings:
+            found = _fuzzy_find(function_name, _state.by_python_name)
+            if found:
+                bindings = found
 
-    if bindings:
-        md.h3("Registered Implementations (TORCH_LIBRARY_IMPL)")
-        by_dispatch: Dict[str, List] = {}
-        for b in bindings:
-            key = b.get("dispatch_key", "default")
-            by_dispatch.setdefault(key, []).append(b)
-
-        for dispatch_key, group in sorted(by_dispatch.items()):
-            md.text(f"**{dispatch_key}:**")
-            for b in group[:5]:
-                path = _rel_path(b.get("file_path", ""))
+        if bindings:
+            md.h3("Dispatch Registrations (TORCH_LIBRARY_IMPL)")
+            rows = []
+            seen = set()
+            for b in bindings:
+                key = (b.get("dispatch_key"), b.get("cpp_name"), b.get("file_path"))
+                if key in seen:
+                    continue
+                seen.add(key)
+                dispatch = b.get("dispatch_key") or "default"
+                cpp = b.get("cpp_name") or "N/A"
+                path = _rel_path(b.get("file_path") or "")
                 line = f":{b['line_number']}" if b.get("line_number") else ""
-                md.item(f"`{b.get('cpp_name', 'N/A')}` → `{path}{line}`")
+                rows.append([dispatch, f"`{cpp}`", f"`{path}{line}`"])
+
+            if rows:
+                md.table(["Backend", "C++ Function", "File"], rows[:20])
             md.blank()
 
-    # Derivative formula
-    deriv = _state.derivatives.get(function_name) or _state.derivatives.get(base_name)
-    if deriv and deriv.get("gradients"):
-        md.h3("Derivative Formula (from derivatives.yaml)")
-        for input_name, formula in deriv["gradients"].items():
-            md.item(f"`{input_name}`: `{truncate(formula, 60)}`")
+        # From native_functions.yaml dispatch config
+        if native and native.get("dispatch") and not bindings:
+            md.h3("Dispatch Config (from YAML)")
+            # Safe sort handling None keys
+            for key, impl in sorted(
+                native["dispatch"].items(), key=lambda x: _safe_sort_key(x[0])
+            ):
+                md.item(f"**{key or 'default'}**: `{impl}`")
+            md.blank()
 
-    if not native and not impls and not bindings:
-        similar = _similar_functions(function_name)
-        if similar:
-            md.text(f"\nFunction '{function_name}' not found. Similar:\n")
-            for s in similar[:8]:
-                md.item(s)
+    # === Implementation locations (only for "full") ===
+    impls = []  # Initialize for "not found" check later
+    if focus == "full":
+        if base_name in _state.native_implementations:
+            impls.extend(_state.native_implementations[base_name])
+        else:
+            found = _fuzzy_find(base_name, _state.native_implementations)
+            if found:
+                impls.extend(found)
 
-    return md.build()
+        # Also check dispatch targets
+        if native:
+            for impl_name in native.get("dispatch", {}).values():
+                if impl_name in _state.native_implementations:
+                    impls.extend(_state.native_implementations[impl_name])
 
+        if impls:
+            md.h3("C++ Implementations")
+            seen = set()
+            for impl in impls[:10]:
+                key = (
+                    impl["function_name"],
+                    impl.get("file_path"),
+                    impl.get("line_number"),
+                )
+                if key in seen:
+                    continue
+                seen.add(key)
 
-@mcp.tool()
-async def get_native_function(function_name: str) -> str:
-    """Get native function definition from native_functions.yaml."""
-    _ensure_loaded()
+                path = _rel_path(impl.get("file_path", ""))
+                line = impl.get("line_number", "")
+                md.item(f"`{impl['function_name']}` → `{path}:{line}`")
+            md.blank()
 
-    native = _get_native_func(function_name)
-    if not native:
-        similar = _similar_functions(function_name)
-        if similar:
-            return f"Function '{function_name}' not found. Similar:\n" + "\n".join(
-                f"  - {s}" for s in similar
-            )
-        return f"Function '{function_name}' not found."
-
-    md = Markdown()
-    md.h2(f"Native Function: `{native['name']}`")
-    md.code("Signature", native["signature"])
-    md.blank()
-
-    if native.get("variants"):
-        md.bold("Variants", native["variants"])
-    if native.get("structured"):
-        md.bold("Structured", "Yes")
-    if native.get("structured_delegate"):
-        md.bold("Structured Delegate", native["structured_delegate"])
-    if native.get("tags"):
-        md.bold("Tags", ", ".join(str(t) for t in native["tags"]))
-    md.blank()
-
-    dispatch = native.get("dispatch", {})
-    if dispatch:
-        md.h3("Dispatch Configuration")
-        for key, impl in sorted(dispatch.items()):
-            md.item(f"**{key}**: `{impl}`")
-        md.blank()
-
-    # Derivative
-    deriv = _state.derivatives.get(native["name"]) or _state.derivatives.get(
-        native.get("base_name", "")
+    # Not found handling - check if we actually found anything useful
+    bindings_found = _state.by_python_name.get(function_name) or _state.by_cpp_name.get(
+        function_name
     )
-    if deriv:
-        md.h3("Derivative Formula")
-        md.code("Signature", deriv.get("signature", "N/A"))
-        for k, v in deriv.get("gradients", {}).items():
-            md.item(f"`{k}`: `{truncate(v, 60)}`")
+    found_anything = native or bindings_found or impls
+
+    if not found_anything:
+        similar = _similar_functions(function_name)
+        if similar:
+            md.h3("Function Not Found")
+            md.text(f"No exact match for `{function_name}`. Did you mean:")
+            for s in similar[:8]:
+                md.item(f"`{s}`")
+        else:
+            md.text(f"Function `{function_name}` not found in PyTorch bindings.")
+            md.text("\nTry using `search()` to find related functions.")
 
     return md.build()
 
 
 @mcp.tool()
-async def get_dispatch_implementations(function_name: str) -> str:
-    """Get backend implementations (CPU, CUDA, etc.) for a function."""
+async def cuda_kernels(function_name: str = "") -> str:
+    """
+    Find CUDA kernel launches (<<<grid, block>>>) in PyTorch.
+
+    Args:
+        function_name: Optional filter - search for kernels matching this name
+
+    Returns:
+        CUDA kernel locations with file:line and caller information.
+    """
     _ensure_loaded()
 
     md = Markdown()
-    md.h2(f"Dispatch implementations for `{function_name}`")
-
-    # From binding detector
-    bindings = _state.by_python_name.get(function_name, [])
-    if not bindings:
-        bindings = _state.by_cpp_name.get(function_name, [])
-    if not bindings:
-        found = _fuzzy_find(function_name, _state.by_python_name)
-        if found:
-            bindings = found
-
-    if bindings:
-        md.h3("From TORCH_LIBRARY_IMPL registrations")
-        rows = []
-        seen = set()
-        for b in bindings:
-            key = (b.get("dispatch_key"), b.get("cpp_name"), b.get("file_path"))
-            if key in seen:
-                continue
-            seen.add(key)
-
-            dispatch = b.get("dispatch_key") or "default"
-            cpp = b.get("cpp_name") or "N/A"
-            path = _rel_path(b.get("file_path") or "")
-            line = f":{b['line_number']}" if b.get("line_number") else ""
-            rows.append([dispatch, f"`{cpp}`", f"`{path}{line}`"])
-
-        if rows:
-            md.table(["Dispatch Key", "C++ Function", "File"], rows[:20])
-        md.blank()
-
-    # From native_functions.yaml
-    native = _get_native_func(function_name)
-    if native and native.get("dispatch"):
-        md.h3("From native_functions.yaml dispatch config")
-        for key, impl in sorted(native["dispatch"].items()):
-            md.item(f"**{key}**: `{impl}`")
-
-    if not bindings and not (native and native.get("dispatch")):
-        return f"No dispatch implementations found for '{function_name}'."
-
-    return md.build()
-
-
-@mcp.tool()
-async def get_cuda_kernels(function_name: str = "") -> str:
-    """Get CUDA kernel information."""
-    _ensure_loaded()
-
-    md = Markdown()
-    title = f"CUDA Kernels for '{function_name}'" if function_name else "CUDA Kernels"
+    title = f"CUDA Kernels: '{function_name}'" if function_name else "CUDA Kernels"
     md.h2(title)
 
     kernels = _state.cuda_kernels
     if function_name:
         name_lower = function_name.lower()
-        kernels = [k for k in kernels if name_lower in k.get("name", "").lower()]
+        kernels = [k for k in kernels if name_lower in (k.get("name") or "").lower()]
 
     if not kernels:
         if function_name:
@@ -892,15 +864,14 @@ async def get_cuda_kernels(function_name: str = "") -> str:
     md.text(f"Found {len(kernels)} kernel(s)\n")
 
     for kernel in kernels[:15]:
-        md.code(kernel.get("name", "unnamed"), "")
+        name = kernel.get("name", "unnamed")
         path = _rel_path(kernel.get("file_path", ""))
         line = kernel.get("line_number", "")
-        md.item(f"File: `{path}:{line}`", 1)
+        md.item(f"`{name}` → `{path}:{line}`")
 
         callers = kernel.get("callers", [])
         if callers:
             md.item(f"Called by: {', '.join(f'`{c}`' for c in callers[:3])}", 1)
-        md.blank()
 
     if len(kernels) > 15:
         md.text(f"\n*Showing 15 of {len(kernels)} kernels*")
@@ -909,40 +880,66 @@ async def get_cuda_kernels(function_name: str = "") -> str:
 
 
 @mcp.tool()
-async def search_bindings(query: str, limit: int = 20) -> str:
-    """Search bindings by name."""
+async def search(query: str, backend: str = "", limit: int = 20) -> str:
+    """
+    Search PyTorch bindings by name with optional backend filter.
+
+    Args:
+        query: Search term (fuzzy matches Python and C++ names)
+        backend: Optional filter - "CPU", "CUDA", "Meta", etc.
+        limit: Max results to return (default 20)
+
+    Returns:
+        Matching bindings with dispatch keys and file locations.
+    """
     _ensure_loaded()
 
     query_lower = query.lower()
-    matches = [
-        b
-        for b in _state.bindings
-        if query_lower in b.get("python_name", "").lower()
-        or query_lower in b.get("cpp_name", "").lower()
-    ]
+    backend_lower = backend.lower() if backend else ""
+
+    matches = []
+    for b in _state.bindings:
+        # Name match
+        name_match = (
+            query_lower in (b.get("python_name") or "").lower()
+            or query_lower in (b.get("cpp_name") or "").lower()
+        )
+        if not name_match:
+            continue
+
+        # Backend filter
+        if backend_lower:
+            dispatch_key = (b.get("dispatch_key") or "").lower()
+            if backend_lower not in dispatch_key:
+                continue
+
+        matches.append(b)
 
     if not matches:
-        return f"No bindings found matching '{query}'."
+        filter_msg = f" with backend '{backend}'" if backend else ""
+        return f"No bindings found matching '{query}'{filter_msg}."
 
     # Dedupe
     seen = set()
     unique = []
     for m in matches:
-        key = (m.get("python_name"), m.get("cpp_name"))
+        key = (m.get("python_name"), m.get("cpp_name"), m.get("dispatch_key"))
         if key not in seen:
             seen.add(key)
             unique.append(m)
 
     md = Markdown()
-    md.h2(f"Search results for '{query}'")
+    filter_msg = f" (backend: {backend})" if backend else ""
+    md.h2(f"Search: '{query}'{filter_msg}")
     md.text(f"Found {len(unique)} binding(s)\n")
 
     for b in unique[:limit]:
         dispatch = f" [{b['dispatch_key']}]" if b.get("dispatch_key") else ""
-        md.bold(b.get("python_name", "N/A"), dispatch)
-        md.item(f"`{b.get('cpp_name', 'N/A')}`", 1)
-        md.item(f"`{_rel_path(b.get('file_path', ''))}`", 1)
-        md.blank()
+        py_name = b.get("python_name", "N/A")
+        cpp_name = b.get("cpp_name", "N/A")
+        path = _rel_path(b.get("file_path", ""))
+        line = f":{b['line_number']}" if b.get("line_number") else ""
+        md.item(f"**{py_name}**{dispatch} → `{cpp_name}` (`{path}{line}`)")
 
     if len(unique) > limit:
         md.text(f"\n*Showing {limit} of {len(unique)} results*")
@@ -951,155 +948,167 @@ async def search_bindings(query: str, limit: int = 20) -> str:
 
 
 @mcp.tool()
-async def get_cpp_callees(function_name: str) -> str:
-    """Get C++ functions called by the given function."""
-    _ensure_loaded()
+async def calls(function_name: str) -> str:
+    """
+    Find functions that this function calls (outbound dependencies).
 
-    status = _cpp_status()
-    if status:
+    Args:
+        function_name: C++ function to analyze
+
+    Returns:
+        List of called functions with file:line locations.
+    """
+    _ensure_loaded()
+    if status := _cpp_status():
         return status
 
     callees = _state.cpp_extractor.get_callees(function_name, fuzzy=True)
     if not callees:
-        return f"No call data found for '{function_name}'."
+        return f"No outbound calls found for '{function_name}'."
+
+    results = _dedupe_by_key(callees, "callee")
 
     md = Markdown()
-    md.h2(f"C++ functions called by '{function_name}'")
+    md.h2(f"Calls: `{function_name}`")
+    md.text("*Functions this calls (outbound dependencies):*\n")
 
-    by_caller: Dict[str, List] = {}
-    for item in callees:
-        by_caller.setdefault(item["caller"], []).append(item)
+    for item in results[:30]:
+        _format_call_item(md, item, "callee", "callee_file", "callee_line")
 
-    for caller, items in list(by_caller.items())[:10]:
-        md.h3(f"`{caller}`")
-        md.text("Calls:")
-        for item in items[:15]:
-            callee = item["callee"]
-            if item.get("callee_file"):
-                path = _rel_path(item["callee_file"])
-                line = f":{item['callee_line']}" if item.get("callee_line") else ""
-                md.item(f"`{callee}` → `{path}{line}`")
-            else:
-                md.item(f"`{callee}`")
-        if len(items) > 15:
-            md.item(f"... and {len(items) - 15} more")
-        md.blank()
-
-    stats = _state.cpp_extractor.get_call_graph_data()["stats"]
-    md.text(
-        f"\n*Call graph: {stats['total_functions']} functions, {stats['total_call_edges']} edges*"
-    )
+    if len(results) > 30:
+        md.text(f"\n*Showing 30 of {len(results)} calls*")
 
     return md.build()
 
 
 @mcp.tool()
-async def get_cpp_callers(function_name: str) -> str:
-    """Get C++ functions that call the given function (impact analysis)."""
-    _ensure_loaded()
+async def called_by(function_name: str) -> str:
+    """
+    Find functions that call this function (inbound dependents).
 
-    status = _cpp_status()
-    if status:
+    Args:
+        function_name: C++ function to analyze
+
+    Returns:
+        List of calling functions with file:line locations.
+    """
+    _ensure_loaded()
+    if status := _cpp_status():
         return status
 
     callers = _state.cpp_extractor.get_callers(function_name, fuzzy=True)
     if not callers:
+        return f"No inbound callers found for '{function_name}'."
+
+    results = _dedupe_by_key(callers, "caller")
+
+    md = Markdown()
+    md.h2(f"Called by: `{function_name}`")
+    md.text("*Functions that call this (inbound dependents):*\n")
+
+    for item in results[:30]:
+        _format_call_item(md, item, "caller", "caller_file", "caller_line")
+
+    if len(results) > 30:
+        md.text(f"\n*Showing 30 of {len(results)} callers*")
+
+    return md.build()
+
+
+@mcp.tool()
+async def impact(function_name: str, depth: int = 3) -> str:
+    """
+    Analyze the impact of modifying a function (transitive callers).
+
+    Traces all code paths that depend on this function, useful for:
+    - Security: Understanding vulnerability exposure
+    - Refactoring: Knowing what might break
+    - Testing: Identifying affected test coverage
+
+    Args:
+        function_name: C++ function to analyze
+        depth: How many levels of callers to trace (default 3, max 5)
+
+    Returns:
+        Transitive callers grouped by depth, plus Python entry points if found.
+    """
+    _ensure_loaded()
+    if status := _cpp_status():
+        return status
+
+    depth = min(max(depth, 1), 5)
+
+    # BFS to find transitive callers
+    visited = set()
+    current_level = {function_name}
+    callers_by_depth: Dict[int, List[Dict]] = {}
+
+    for level in range(1, depth + 1):
+        next_level = set()
+        level_callers = []
+
+        for func in current_level:
+            for item in _state.cpp_extractor.get_callers(func, fuzzy=(level == 1)):
+                caller = item["caller"]
+                if caller not in visited and caller != function_name:
+                    visited.add(caller)
+                    next_level.add(caller)
+                    level_callers.append(item)
+
+        if level_callers:
+            callers_by_depth[level] = level_callers
+        current_level = next_level
+        if not current_level:
+            break
+
+    if not callers_by_depth:
         return f"No callers found for '{function_name}'."
 
     md = Markdown()
-    md.h2(f"C++ functions that call '{function_name}'")
+    md.h2(f"Impact Analysis: `{function_name}`")
+    md.text(f"*Tracing callers up to {depth} levels deep*\n")
 
-    by_callee: Dict[str, List] = {}
-    for item in callers:
-        by_callee.setdefault(item["callee"], []).append(item)
+    # Output by depth
+    total = 0
+    for level, callers in callers_by_depth.items():
+        unique = _dedupe_by_key(callers, "caller")
+        total += len(unique)
+        md.h3(f"Depth {level} ({len(unique)} callers)")
 
-    for callee, items in list(by_callee.items())[:10]:
-        md.h3(f"`{callee}`")
-        md.text("Called by:")
-        for item in items[:15]:
-            caller = item["caller"]
-            if item.get("caller_file"):
-                path = _rel_path(item["caller_file"])
-                line = f":{item['caller_line']}" if item.get("caller_line") else ""
-                md.item(f"`{caller}` → `{path}{line}`")
-            else:
-                md.item(f"`{caller}`")
-        if len(items) > 15:
-            md.item(f"... and {len(items) - 15} more")
+        for item in unique[:15]:
+            _format_call_item(md, item, "caller", "caller_file", "caller_line")
+
+        if len(unique) > 15:
+            md.item(f"*... and {len(unique) - 15} more*")
         md.blank()
 
-    stats = _state.cpp_extractor.get_call_graph_data()["stats"]
+    # Find Python entry points
+    python_entries = [
+        {
+            "python": b.get("python_name", c),
+            "cpp": c,
+            "dispatch": b.get("dispatch_key", ""),
+        }
+        for c in visited
+        if c in _state.by_cpp_name
+        for b in _state.by_cpp_name[c][:1]
+    ]
+
+    if python_entries:
+        md.h3(f"Python Entry Points ({len(python_entries)} found)")
+        md.text("*These Python APIs eventually call the target function:*\n")
+        for entry in python_entries[:10]:
+            dispatch = f" [{entry['dispatch']}]" if entry["dispatch"] else ""
+            md.item(f"`{entry['python']}`{dispatch} → `{entry['cpp']}`")
+        if len(python_entries) > 10:
+            md.item(f"*... and {len(python_entries) - 10} more*")
+
+    md.blank()
     md.text(
-        f"\n*Call graph: {stats['total_functions']} functions, {stats['total_call_edges']} edges*"
+        f"**Total impact:** {total} functions across {len(callers_by_depth)} levels"
     )
 
     return md.build()
-
-
-@mcp.tool()
-async def list_binding_types() -> str:
-    """Get summary of all binding types."""
-    _ensure_loaded()
-
-    md = Markdown()
-    md.h2("Binding Types Summary")
-    md.bold("Total bindings", str(len(_state.bindings)))
-    md.bold("CUDA kernels", str(len(_state.cuda_kernels)))
-    md.blank()
-
-    for btype, bindings in sorted(
-        _state.by_binding_type.items(), key=lambda x: -len(x[1])
-    ):
-        md.h3(f"{btype} ({len(bindings)} bindings)")
-        for b in bindings[:3]:
-            md.item(f"`{b.get('python_name', 'N/A')}` → `{b.get('cpp_name', 'N/A')}`")
-        if len(bindings) > 3:
-            md.item(f"... and {len(bindings) - 3} more")
-        md.blank()
-
-    if _state.by_dispatch_key:
-        md.h3("Dispatch Keys")
-        for key, bindings in sorted(
-            _state.by_dispatch_key.items(), key=lambda x: -len(x[1])
-        ):
-            md.item(f"**{key}**: {len(bindings)} implementations")
-
-    return md.build()
-
-
-@mcp.tool()
-async def get_call_graph(function_name: str) -> str:
-    """Get call relationships for a function."""
-    _ensure_loaded()
-
-    md = Markdown()
-    md.h2(f"Call graph for '{function_name}'")
-
-    # Check C++ call graph first
-    if _state.cpp_extractor:
-        callees = _state.cpp_extractor.get_callees(function_name, fuzzy=True)
-        callers = _state.cpp_extractor.get_callers(function_name, fuzzy=True)
-
-        if callees:
-            md.h3("Calls (what this function calls)")
-            seen = set()
-            for item in callees[:20]:
-                if item["callee"] not in seen:
-                    seen.add(item["callee"])
-                    md.item(f"`{item['callee']}`")
-
-        if callers:
-            md.h3("Called by (what calls this function)")
-            seen = set()
-            for item in callers[:20]:
-                if item["caller"] not in seen:
-                    seen.add(item["caller"])
-                    md.item(f"`{item['caller']}`")
-
-        if callees or callers:
-            return md.build()
-
-    return f"No call graph data found for '{function_name}'."
 
 
 # =============================================================================

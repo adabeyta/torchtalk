@@ -1,7 +1,7 @@
 ---
 name: torchtalk-analyzer
 description: Get cross-language binding information for PyTorch codebases (Python → C++ → CUDA). Use when you need to understand dispatch paths, find backend implementations (CPU/CUDA), trace CUDA kernels, or understand how Python APIs connect to native code. Provides structural architectural data, not code search.
-allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__get_binding_chain, mcp__torchtalk__get_native_function, mcp__torchtalk__get_dispatch_implementations, mcp__torchtalk__get_cpp_callers, mcp__torchtalk__get_cpp_callees, mcp__torchtalk__get_cuda_kernels, mcp__torchtalk__search_bindings, Read, Grep, Glob
+allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__trace, mcp__torchtalk__search, mcp__torchtalk__impact, mcp__torchtalk__calls, mcp__torchtalk__called_by, mcp__torchtalk__cuda_kernels, Read, Grep, Glob
 ---
 
 # TorchTalk Cross-Language Binding Analyzer
@@ -24,63 +24,70 @@ This shows what's loaded and any setup needed.
 
 ## Primary Tools
 
-### `get_binding_chain(function_name)`
+### `trace(function_name, focus?)`
 **Use for:** "How does X work?" / "Where is X implemented?"
 
-Shows complete Python → C++ → file mapping with dispatch configuration.
+Shows complete Python → YAML → C++ → file mapping.
+- `focus="full"` (default): Everything
+- `focus="yaml"`: Just native_functions.yaml definition
+- `focus="dispatch"`: Just backend registrations
 
 ```
-get_binding_chain("matmul")
-→ Native function definition from native_functions.yaml
+trace("matmul")
+→ Definition from native_functions.yaml
 → Dispatch: CompositeImplicitAutograd → matmul
 → Implementation: aten/src/ATen/native/LinearAlgebra.cpp:1996
 ```
 
-### `get_cpp_callers(function_name)` ⭐ Impact Analysis
-**Use for:** "What would break if I change X?" / "What depends on X?"
+### `impact(function_name, depth?)` ⭐ Security/Refactoring
+**Use for:** "What would break if I change X?" / "What's the blast radius?"
 
-Shows all C++ functions that call the target function.
+Traces **transitive** callers up to `depth` levels (default 3, max 5).
+Also finds Python entry points that eventually call the target.
 
 ```
-get_cpp_callers("gemm")
-→ gemm is called by:
-  - at::native::cpublas::brgemm at CPUBlas.cpp:1347
-  - at::native::addmm at LinearAlgebra.cpp:892
+impact("gemm", depth=3)
+→ Depth 1: addmm, bmm, mm (direct callers)
+→ Depth 2: linear, matmul (callers of callers)
+→ Depth 3: transformer layers...
+→ Python Entry Points: torch.nn.Linear, torch.matmul
 ```
 
-### `get_cpp_callees(function_name)` ⭐ Dependency Analysis
+### `called_by(function_name)`
+**Use for:** "What directly calls X?" (single level)
+
+Shows immediate callers with file:line locations.
+
+```
+called_by("gemm")
+→ at::native::cpublas::brgemm at CPUBlas.cpp:1347
+→ at::native::addmm at LinearAlgebra.cpp:892
+```
+
+### `calls(function_name)`
 **Use for:** "What does X call internally?" / "What are X's dependencies?"
 
-Shows what a function calls.
+Shows functions this calls with file:line locations.
 
 ```
-get_cpp_callees("_matmul_impl")
-→ _matmul_impl calls:
-  - at::Tensor::mm
-  - at::Tensor::mv
-  - at::Tensor::dot
-  - at::Tensor::squeeze
+calls("_matmul_impl")
+→ at::Tensor::mm, at::Tensor::mv, at::Tensor::dot
 ```
 
-### `get_native_function(function_name)`
-**Use for:** Official operator definition from native_functions.yaml
-
-Shows authoritative signature, dispatch config, and backward formula.
-
-### `get_dispatch_implementations(function_name)`
-**Use for:** "Which backend (CPU/CUDA) handles X?"
-
-Table of all backend implementations with file locations.
-
-### `get_cuda_kernels(function_name)`
-**Use for:** "What GPU kernels does X use?"
-
-Shows `__global__` CUDA kernels and what launches them.
-
-### `search_bindings(query)`
+### `search(query, backend?)`
 **Use for:** "Find functions related to X"
 
-Search all bindings by name.
+Search bindings by name with optional backend filter.
+
+```
+search("conv", backend="CUDA")
+→ Only CUDA implementations of conv-related functions
+```
+
+### `cuda_kernels(function_name?)`
+**Use for:** "What GPU kernels does X use?"
+
+Shows `__global__` CUDA kernels with `<<<>>>` launches.
 
 ## Workflow Examples
 
@@ -88,34 +95,34 @@ Search all bindings by name.
 
 1. Get the binding chain:
    ```
-   get_binding_chain("matmul")
+   trace("matmul")
    ```
 2. Get internal calls:
    ```
-   get_cpp_callees("matmul")
+   calls("matmul")
    ```
 3. Read the implementation file shown in results
 4. Answer with specific code references
 
 ### Example 2: "What would break if I modify the GEMM implementation?"
 
-1. Find callers:
+1. Get full impact analysis:
    ```
-   get_cpp_callers("gemm")
+   impact("gemm", depth=4)
    ```
-2. For each caller, check what it does:
-   ```
-   get_binding_chain("addmm")  # if addmm calls gemm
-   ```
-3. Explain the impact chain
+2. Review Python entry points to understand user-facing impact
+3. Explain the impact chain from low-level to high-level
 
 ### Example 3: "Where is conv2d implemented for CUDA?"
 
-1. Get dispatch implementations:
+1. Search with backend filter:
    ```
-   get_dispatch_implementations("conv2d")
+   search("conv2d", backend="CUDA")
    ```
-2. Look for CUDA dispatch key in results
+2. Or get full trace:
+   ```
+   trace("conv2d", focus="dispatch")
+   ```
 3. Read the CUDA file
 
 ## Tool Status
@@ -124,11 +131,11 @@ Some tools require `compile_commands.json` (generated by building PyTorch):
 
 | Tool | Requires Build? | Purpose |
 |------|----------------|---------|
-| `get_binding_chain` | No | Python→C++ mapping |
-| `get_native_function` | No | Operator definitions |
-| `get_dispatch_implementations` | No | Backend routing |
-| `get_cuda_kernels` | No | GPU kernels |
-| `get_cpp_callers` | **Yes** | Impact analysis |
-| `get_cpp_callees` | **Yes** | Dependency tracing |
+| `trace` | No | Python→C++ mapping |
+| `search` | No | Find bindings |
+| `cuda_kernels` | No | GPU kernels |
+| `impact` | **Yes** | Transitive callers |
+| `calls` | **Yes** | Outbound dependencies |
+| `called_by` | **Yes** | Inbound dependencies |
 
-If `get_cpp_callers`/`get_cpp_callees` return "not available", the user needs to build PyTorch once. Use `get_status()` for guidance.
+If call graph tools return "not available", the user needs to build PyTorch once. Use `get_status()` for guidance.

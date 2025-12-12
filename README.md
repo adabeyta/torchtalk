@@ -20,11 +20,7 @@ pip install -e .
 # Add to Claude Code (one command)
 claude mcp add torchtalk -s user -- torchtalk mcp-serve --pytorch-source /path/to/pytorch
 ```
-
-That's it. Claude Code now has access to PyTorch's cross-language bindings.
-
 ## Requirements
-
 - **Python 3.10+**
 - **PyTorch source code**: `git clone https://github.com/pytorch/pytorch`
 - **compile_commands.json** (optional): For full C++ call graph, build PyTorch once:
@@ -36,36 +32,12 @@ That's it. Claude Code now has access to PyTorch's cross-language bindings.
 
 | Tool | Description |
 |------|-------------|
-| `get_binding_chain(func)` | Full Python → C++ → file mapping |
-| `get_native_function(func)` | Definition from native_functions.yaml |
-| `get_dispatch_implementations(func)` | Backend implementations (CPU, CUDA, etc.) |
-| `get_cpp_callees(func)` | What does this function call? |
-| `get_cpp_callers(func)` | What calls this function? (impact analysis) |
-| `get_cuda_kernels(func)` | CUDA kernel information |
-| `search_bindings(query)` | Search all bindings by name |
-
-## Example Usage
-
-```
-You: "What would break if I changed the GEMM implementation?"
-
-Claude uses get_cpp_callers("gemm") →
-  gemm is called by:
-  - at::native::cpublas::brgemm at CPUBlas.cpp:1347
-
-You: "How does torch.matmul work internally?"
-
-Claude uses get_binding_chain("matmul") + get_cpp_callees("matmul") →
-  matmul → _matmul_impl → mm, mv, dot, squeeze, unsqueeze...
-```
-
-## Performance
-
-| Scenario | Time |
-|----------|------|
-| First startup | ~0.3s (C++ call graph builds in background) |
-| Background build | ~90s (60K functions, 139K edges) |
-| Cached startup | ~0.5s |
+| `trace(func, focus?)` | Python → YAML → C++ → file:line. Focus: "full", "yaml", "dispatch" |
+| `search(query, backend?)` | Find bindings by name with optional backend filter (CPU/CUDA/Meta) |
+| `impact(func, depth?)` | Transitive callers + Python entry points (security/refactoring) |
+| `calls(func)` | Outbound: functions `func` invokes internally |
+| `called_by(func)` | Inbound: functions that invoke `func` |
+| `cuda_kernels(func?)` | GPU kernel `<<<>>>` launches with file:line |
 
 ## Project Structure
 
@@ -89,18 +61,7 @@ torchtalk/
 ## How It Works
 
 1. **On first run**: Parses `native_functions.yaml`, detects pybind11 bindings, builds C++ call graph
-2. **Caches everything**: Subsequent startups load from `~/.cache/torchtalk/` (~0.5s)
+2. **Caches everything**: Subsequent startups load from `~/.cache/torchtalk/`
 3. **Background building**: C++ call graph builds in background, tools work immediately
 
-## Development
 
-```bash
-# Install with dev dependencies
-pip install -e ".[dev]"
-
-# Run tests
-pytest
-
-# Run MCP server directly
-python -m torchtalk mcp-serve --pytorch-source /path/to/pytorch
-```

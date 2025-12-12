@@ -11,6 +11,26 @@ from multiprocessing import Pool, cpu_count
 
 log = logging.getLogger(__name__)
 
+
+def _levenshtein_distance(s1: str, s2: str) -> int:
+    """Compute Levenshtein edit distance between two strings."""
+    if len(s1) < len(s2):
+        return _levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+
+    previous_row = range(len(s2) + 1)
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
 # Check libclang availability (actual imports happen in subprocess)
 try:
     import clang.cindex  # noqa: F401
@@ -266,20 +286,55 @@ class CppCallGraphExtractor:
             | set(self.function_locations.keys())
         )
 
+        # 1. Exact match
         if name in all_funcs:
             return [name]
 
         if not fuzzy:
             return []
 
+        # 2. Namespace suffix match (at::native::gemm matches "gemm")
         matches = [f for f in all_funcs if f.endswith("::" + name) or f == name]
         if matches:
             return matches
 
+        # 3. Case-insensitive substring match
         name_lower = name.lower()
-        matches = [f for f in all_funcs if name_lower in f.lower()]
-        matches.sort(key=len)
-        return matches[:20]
+        substring_matches = [f for f in all_funcs if name_lower in f.lower()]
+
+        # 4. Extract base name from namespaced functions for better matching
+        # e.g., "gemm" should match "at::native::cpublas::gemm"
+        base_name_matches = []
+        for f in all_funcs:
+            # Get the last part after ::
+            base = f.split("::")[-1] if "::" in f else f
+            if base.lower() == name_lower:
+                base_name_matches.append(f)
+
+        # 5. Levenshtein distance for typo tolerance (only if name is long enough)
+        levenshtein_matches = []
+        if len(name) >= 4 and not substring_matches and not base_name_matches:
+            for f in all_funcs:
+                base = f.split("::")[-1] if "::" in f else f
+                if abs(len(base) - len(name)) <= 3:
+                    dist = _levenshtein_distance(name_lower, base.lower())
+                    if dist <= max(2, len(name) // 3):
+                        levenshtein_matches.append((dist, f))
+            levenshtein_matches.sort(key=lambda x: x[0])
+            levenshtein_matches = [f for _, f in levenshtein_matches[:10]]
+
+        # Combine results with priority: base_name > substring > levenshtein
+        result = []
+        seen = set()
+        for matches_list in [base_name_matches, substring_matches, levenshtein_matches]:
+            for m in matches_list:
+                if m not in seen:
+                    seen.add(m)
+                    result.append(m)
+
+        # Sort by length (prefer shorter/more specific matches)
+        result.sort(key=len)
+        return result[:20]
 
     def save_cache(self, cache_key: str) -> Path:
         cache_path = self.cache_dir / f"{cache_key}.json"
