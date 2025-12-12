@@ -12,6 +12,12 @@ from typing import Optional, Dict, List, Any, Tuple
 from mcp.server.fastmcp import FastMCP
 
 from .formatting import Markdown, relative_path, truncate
+from .analysis.helpers import (
+    levenshtein_distance,
+    fuzzy_match,
+    safe_sort_key,
+    dedupe_by_key,
+)
 
 log = logging.getLogger(__name__)
 mcp = FastMCP("torchtalk")
@@ -28,16 +34,23 @@ CACHE_DIR = Path.home() / ".cache" / "torchtalk"
 class ServerState:
     """Server state container."""
 
+    # ATen operator data
     bindings: List[Dict] = field(default_factory=list)
     cuda_kernels: List[Dict] = field(default_factory=list)
     native_functions: Dict[str, Dict] = field(default_factory=dict)
     derivatives: Dict[str, Dict] = field(default_factory=dict)
     native_implementations: Dict[str, List[Dict]] = field(default_factory=dict)
 
-    # Indexes
+    # ATen indexes
     by_python_name: Dict[str, List[Dict]] = field(default_factory=dict)
     by_cpp_name: Dict[str, List[Dict]] = field(default_factory=dict)
     by_dispatch_key: Dict[str, List[Dict]] = field(default_factory=dict)
+
+    # Python module data (torch.nn, torch.optim, etc.)
+    py_modules: Dict[str, Any] = field(default_factory=dict)
+    py_classes: Dict[str, List[Any]] = field(default_factory=dict)
+    py_functions: Dict[str, List[Any]] = field(default_factory=dict)
+    nn_modules: List[Any] = field(default_factory=list)
 
     # Paths
     pytorch_source: Optional[str] = None
@@ -253,36 +266,8 @@ def _find_implementations(source: str, functions: Dict) -> Dict[str, List[Dict]]
     return impls
 
 
-def _levenshtein_distance(s1: str, s2: str) -> int:
-    """Compute Levenshtein edit distance between two strings."""
-    if len(s1) < len(s2):
-        return _levenshtein_distance(s2, s1)
-
-    if len(s2) == 0:
-        return len(s1)
-
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-
-    return previous_row[-1]
-
-
-def _safe_sort_key(item: Any) -> str:
-    """Sort key that handles None values (sorts None last)."""
-    if item is None:
-        return "\uffff"
-    return str(item) if not isinstance(item, str) else item
-
-
 def _fuzzy_find(name: str, data: Dict[str, Any]) -> Optional[List[Any]]:
-    """Fuzzy match function name."""
+    """Fuzzy match function name in a dict."""
     if name in data:
         return data[name] if isinstance(data[name], list) else [data[name]]
 
@@ -301,19 +286,17 @@ def _fuzzy_find(name: str, data: Dict[str, Any]) -> Optional[List[Any]]:
         return v if isinstance(v, list) else [v]
 
     # Levenshtein distance match (for typos)
-    if len(name) >= 3:  # Only for names of reasonable length
+    if len(name) >= 3:
         candidates = []
         for key in data:
-            # Only check keys of similar length (optimization)
             if abs(len(key) - len(name)) <= 3:
-                dist = _levenshtein_distance(name_lower, key.lower())
-                # Accept if edit distance is <= 2 or <= 30% of string length
+                dist = levenshtein_distance(name_lower, key.lower())
                 max_dist = max(2, len(name) // 3)
                 if dist <= max_dist:
                     candidates.append((dist, key, data[key]))
 
         if candidates:
-            candidates.sort(key=lambda x: x[0])  # Sort by distance
+            candidates.sort(key=lambda x: x[0])
             v = candidates[0][2]
             return v if isinstance(v, list) else [v]
 
@@ -485,6 +468,47 @@ def _ensure_loaded():
         raise RuntimeError("No data loaded. Start server with --pytorch-source.")
 
 
+def _init_python_modules(source: str):
+    """Initialize Python module analysis (torch.nn, torch.optim, etc.)."""
+    global _state
+
+    try:
+        from .analysis.python_analyzer import PythonAnalyzer, build_module_index
+
+        analyzer = PythonAnalyzer()
+        src = Path(source)
+
+        # Analyze key Python module directories
+        dirs_to_analyze = [
+            src / "torch/nn",
+            src / "torch/optim",
+            src / "torch/autograd",
+            src / "torch/fx",
+            src / "torch/_dynamo",
+            src / "torch/_inductor",
+            src / "torch/distributed",
+        ]
+
+        all_modules: Dict[str, Any] = {}
+        for dir_path in dirs_to_analyze:
+            if dir_path.exists():
+                modules = analyzer.analyze_directory(str(dir_path), skip_tests=True)
+                all_modules.update(modules)
+
+        if all_modules:
+            index = build_module_index(all_modules)
+            _state.py_modules = all_modules
+            _state.py_classes = index["by_class"]
+            _state.py_functions = index["by_function"]
+            _state.nn_modules = index["nn_modules"]
+            log.info(
+                f"Loaded {len(all_modules)} Python modules, "
+                f"{len(_state.nn_modules)} nn.Module classes"
+            )
+    except Exception as e:
+        log.warning(f"Failed to analyze Python modules: {e}")
+
+
 def _init_from_source(source: str):
     """Initialize from PyTorch source."""
     global _state
@@ -508,6 +532,7 @@ def _init_from_source(source: str):
 
     _state.pytorch_source = str(src)
     _init_cpp_call_graph(str(src))
+    _init_python_modules(str(src))
 
 
 def _auto_detect_pytorch() -> Optional[str]:
@@ -566,7 +591,7 @@ def _similar_functions(name: str, limit: int = 10) -> List[str]:
         for key in _state.native_functions:
             if key in substring_matches or abs(len(key) - len(name)) > 5:
                 continue
-            dist = _levenshtein_distance(name_lower, key.lower())
+            dist = levenshtein_distance(name_lower, key.lower())
             if dist <= max_dist:
                 results.append((dist, len(key), key))
 
@@ -579,17 +604,6 @@ def _similar_functions(name: str, limit: int = 10) -> List[str]:
 def _rel_path(path: str) -> str:
     """Get relative path."""
     return relative_path(path, _state.pytorch_source)
-
-
-def _dedupe_by_key(items: List[Dict], key: str) -> List[Dict]:
-    """Deduplicate list of dicts by a key."""
-    seen = set()
-    result = []
-    for item in items:
-        if (val := item.get(key)) and val not in seen:
-            seen.add(val)
-            result.append(item)
-    return result
 
 
 def _format_call_item(
@@ -662,6 +676,17 @@ async def get_status() -> str:
                 md.item("Fix: Build PyTorch with `python setup.py develop`", 1)
     md.blank()
 
+    # Python modules
+    md.h3("Python Modules")
+    if _state.py_modules:
+        md.bold("Status", "Ready")
+        md.item(f"Modules: {len(_state.py_modules):,}", 1)
+        md.item(f"Classes: {sum(len(v) for v in _state.py_classes.values()):,}", 1)
+        md.item(f"nn.Module subclasses: {len(_state.nn_modules):,}", 1)
+    else:
+        md.bold("Status", "Not loaded")
+    md.blank()
+
     # Tools
     md.h3("Available Tools")
     ready = "Ready" if _state.bindings else "Not ready"
@@ -670,12 +695,15 @@ async def get_status() -> str:
         if _state.cpp_extractor
         else ("Building..." if _state.cpp_building else "Not ready")
     )
+    py_ready = "Ready" if _state.py_modules else "Not ready"
 
     md.table(
         ["Tool", "Status", "Description"],
         [
-            ["`trace`", ready, "Python → C++ → file:line (full binding chain)"],
-            ["`search`", ready, "Find bindings by name, optional backend filter"],
+            ["`trace`", ready, "ATen op: Python → C++ → file:line"],
+            ["`search`", ready, "Find ATen bindings by name, optional backend"],
+            ["`trace_module`", py_ready, "Python module: torch.nn.Linear, etc."],
+            ["`list_modules`", py_ready, "List nn.Module classes, optimizers"],
             ["`impact`", cpp_ready, "Transitive callers + Python entry points"],
             ["`calls`", cpp_ready, "Functions this function invokes (outbound)"],
             ["`called_by`", cpp_ready, "Functions that invoke this (inbound)"],
@@ -725,7 +753,7 @@ async def trace(function_name: str, focus: str = "full") -> str:
             md.blank().text("**Dispatch Config:**")
             # Safe sort handling None keys
             for key, impl in sorted(
-                dispatch.items(), key=lambda x: _safe_sort_key(x[0])
+                dispatch.items(), key=lambda x: safe_sort_key(x[0])
             ):
                 md.item(f"{key or 'default'}: `{impl}`")
         md.blank()
@@ -775,7 +803,7 @@ async def trace(function_name: str, focus: str = "full") -> str:
             md.h3("Dispatch Config (from YAML)")
             # Safe sort handling None keys
             for key, impl in sorted(
-                native["dispatch"].items(), key=lambda x: _safe_sort_key(x[0])
+                native["dispatch"].items(), key=lambda x: safe_sort_key(x[0])
             ):
                 md.item(f"**{key or 'default'}**: `{impl}`")
             md.blank()
@@ -966,7 +994,7 @@ async def calls(function_name: str) -> str:
     if not callees:
         return f"No outbound calls found for '{function_name}'."
 
-    results = _dedupe_by_key(callees, "callee")
+    results = dedupe_by_key(callees, "callee")
 
     md = Markdown()
     md.h2(f"Calls: `{function_name}`")
@@ -1000,7 +1028,7 @@ async def called_by(function_name: str) -> str:
     if not callers:
         return f"No inbound callers found for '{function_name}'."
 
-    results = _dedupe_by_key(callers, "caller")
+    results = dedupe_by_key(callers, "caller")
 
     md = Markdown()
     md.h2(f"Called by: `{function_name}`")
@@ -1071,7 +1099,7 @@ async def impact(function_name: str, depth: int = 3) -> str:
     # Output by depth
     total = 0
     for level, callers in callers_by_depth.items():
-        unique = _dedupe_by_key(callers, "caller")
+        unique = dedupe_by_key(callers, "caller")
         total += len(unique)
         md.h3(f"Depth {level} ({len(unique)} callers)")
 
@@ -1107,6 +1135,185 @@ async def impact(function_name: str, depth: int = 3) -> str:
     md.text(
         f"**Total impact:** {total} functions across {len(callers_by_depth)} levels"
     )
+
+    return md.build()
+
+
+# =============================================================================
+# Python Module Tools
+# =============================================================================
+
+
+@mcp.tool()
+async def trace_module(module_name: str) -> str:
+    """
+    Trace a Python module (torch.nn.Linear, torch.optim.Adam, etc.)
+
+    Args:
+        module_name: Module or class name to trace (e.g., "Linear", "torch.nn.Linear")
+
+    Returns:
+        Module definition with methods, base classes, and file location.
+    """
+    _ensure_loaded()
+
+    if not _state.py_classes:
+        return "Python module analysis not available. Ensure PyTorch source is loaded."
+
+    # Extract class name from qualified name
+    search_name = module_name.split(".")[-1]
+
+    # Find matching classes
+    matches = []
+    for name, classes in _state.py_classes.items():
+        if search_name.lower() == name.lower():
+            matches.extend(classes)
+        elif search_name.lower() in name.lower():
+            matches.extend(classes)
+
+    if not matches:
+        # Try fuzzy match
+        similar = fuzzy_match(
+            search_name, list(_state.py_classes.keys()), max_results=5
+        )
+        if similar:
+            return (
+                f"Module `{module_name}` not found. Did you mean: {', '.join(similar)}?"
+            )
+        return f"Module `{module_name}` not found."
+
+    md = Markdown()
+    md.h2(f"Module: `{module_name}`")
+
+    for cls in matches[:3]:  # Limit to 3 matches
+        md.h3(f"{cls.qualified_name}")
+        path = _rel_path(cls.file_path)
+        md.text(f"**File:** `{path}:{cls.line_number}`")
+
+        if cls.bases:
+            md.text(f"**Bases:** {', '.join(cls.bases)}")
+
+        if cls.is_module:
+            md.text("**Type:** torch.nn.Module")
+
+        if cls.docstring:
+            # Truncate docstring
+            doc = (
+                cls.docstring[:300] + "..."
+                if len(cls.docstring) > 300
+                else cls.docstring
+            )
+            md.blank().text(f"*{doc}*")
+
+        if cls.methods:
+            md.blank().text("**Methods:**")
+            for method in cls.methods[:10]:
+                sig = method.signature or "()"
+                md.item(f"`{method.name}{sig}`")
+            if len(cls.methods) > 10:
+                md.item(f"*... and {len(cls.methods) - 10} more*")
+
+        md.blank()
+
+    if len(matches) > 3:
+        md.text(f"*Showing 3 of {len(matches)} matches*")
+
+    return md.build()
+
+
+@mcp.tool()
+async def list_modules(category: str = "nn") -> str:
+    """
+    List available PyTorch modules by category.
+
+    Args:
+        category: Category to list - "nn" (neural network layers), "optim" (optimizers),
+                  "all" (all classes), or a search query
+
+    Returns:
+        List of available modules in the category.
+    """
+    _ensure_loaded()
+
+    if not _state.py_classes:
+        return "Python module analysis not available."
+
+    md = Markdown()
+
+    if category == "nn":
+        md.h2("Neural Network Modules (torch.nn)")
+        modules = sorted(_state.nn_modules, key=lambda x: x.name)
+        md.text(f"Found {len(modules)} nn.Module subclasses\n")
+
+        # Group by type
+        layers = [
+            m
+            for m in modules
+            if not any(x in m.name for x in ["Loss", "Container", "Sequential"])
+        ]
+        losses = [m for m in modules if "Loss" in m.name]
+        containers = [
+            m
+            for m in modules
+            if any(
+                x in m.name
+                for x in ["Container", "Sequential", "ModuleList", "ModuleDict"]
+            )
+        ]
+
+        if layers:
+            md.h3(f"Layers ({len(layers)})")
+            for m in layers[:30]:
+                md.item(f"`{m.name}` - {m.qualified_name}")
+            if len(layers) > 30:
+                md.item(f"*... and {len(layers) - 30} more*")
+
+        if losses:
+            md.h3(f"Loss Functions ({len(losses)})")
+            for m in losses:
+                md.item(f"`{m.name}`")
+
+        if containers:
+            md.h3(f"Containers ({len(containers)})")
+            for m in containers:
+                md.item(f"`{m.name}`")
+
+    elif category == "optim":
+        md.h2("Optimizers (torch.optim)")
+        optim_classes = [
+            cls
+            for name, classes in _state.py_classes.items()
+            for cls in classes
+            if "optim" in cls.qualified_name.lower() and not name.startswith("_")
+        ]
+        for cls in sorted(optim_classes, key=lambda x: x.name)[:20]:
+            md.item(f"`{cls.name}` - {cls.qualified_name}")
+
+    elif category == "all":
+        md.h2("All Python Classes")
+        md.text(f"Total: {sum(len(v) for v in _state.py_classes.values())} classes\n")
+        for name in sorted(_state.py_classes.keys())[:50]:
+            md.item(f"`{name}`")
+        if len(_state.py_classes) > 50:
+            md.text(f"\n*Showing 50 of {len(_state.py_classes)} classes*")
+
+    else:
+        # Search query
+        md.h2(f"Search: '{category}'")
+        matches = []
+        query_lower = category.lower()
+        for name, classes in _state.py_classes.items():
+            if query_lower in name.lower():
+                matches.extend(classes)
+
+        if matches:
+            for cls in matches[:20]:
+                path = _rel_path(cls.file_path)
+                md.item(f"`{cls.name}` - `{path}:{cls.line_number}`")
+            if len(matches) > 20:
+                md.text(f"\n*Showing 20 of {len(matches)} matches*")
+        else:
+            md.text("No matches found.")
 
     return md.build()
 
