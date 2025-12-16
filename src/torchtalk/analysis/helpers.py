@@ -1,12 +1,6 @@
 """Shared helper functions for TorchTalk analyzers."""
 
-from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
-
-
-def line_number_at(content: str, position: int) -> int:
-    """Get 1-indexed line number at position in content."""
-    return content[:position].count("\n") + 1
+from typing import Any, Dict, List, Set, Tuple
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:
@@ -65,40 +59,11 @@ def safe_sort_key(item: Any) -> str:
     return str(item) if not isinstance(item, str) else item
 
 
-def relative_path(path: str, base: Optional[str]) -> str:
-    """Get path relative to base, or just filename if not under base."""
-    if not path:
-        return ""
-    if not base:
-        return Path(path).name
-
-    try:
-        return str(Path(path).relative_to(base))
-    except ValueError:
-        return Path(path).name
-
-
 def truncate(text: str, max_len: int = 80) -> str:
     """Truncate text with ellipsis."""
     if not text or len(text) <= max_len:
         return text or ""
     return text[: max_len - 3] + "..."
-
-
-def extract_docstring(content: str, start: int) -> Optional[str]:
-    """Extract docstring from position (looks for triple-quoted string)."""
-    # Skip whitespace and newlines
-    i = start
-    while i < len(content) and content[i] in " \t\n":
-        i += 1
-
-    # Check for docstring
-    for quote in ['"""', "'''"]:
-        if content[i:].startswith(quote):
-            end = content.find(quote, i + 3)
-            if end != -1:
-                return content[i + 3 : end].strip()
-    return None
 
 
 def dedupe_by_key(items: List[Dict], key: str) -> List[Dict]:
@@ -110,43 +75,3 @@ def dedupe_by_key(items: List[Dict], key: str) -> List[Dict]:
             seen.add(val)
             result.append(item)
     return result
-
-
-def find_matching_brace(
-    content: str, start: int, open_char: str = "{", close_char: str = "}"
-) -> int:
-    """Find matching closing brace, returns position after closing brace."""
-    depth = 1
-    i = start + 1
-    while i < len(content) and depth > 0:
-        if content[i] == open_char:
-            depth += 1
-        elif content[i] == close_char:
-            depth -= 1
-        i += 1
-    return i
-
-
-def parse_qualified_name(name: str) -> Tuple[str, str]:
-    """Parse 'module.submodule.name' into ('module.submodule', 'name')."""
-    if "." in name:
-        parts = name.rsplit(".", 1)
-        return parts[0], parts[1]
-    return "", name
-
-
-def normalize_pytorch_name(name: str) -> str:
-    """Normalize PyTorch function/class name for matching.
-
-    Handles:
-    - aten::add -> add
-    - torch.nn.Linear -> Linear
-    - _C._nn.linear -> linear
-    """
-    # Remove namespace prefixes
-    if "::" in name:
-        name = name.split("::")[-1]
-    if "." in name:
-        name = name.split(".")[-1]
-    # Remove leading underscores for internal functions
-    return name.lstrip("_")

@@ -25,22 +25,6 @@ class BindingType(Enum):
     AT_DISPATCH = "at_dispatch"  # AT_DISPATCH_FLOATING_TYPES(...)
 
 
-class DispatchKey(Enum):
-    """PyTorch dispatch keys."""
-
-    CPU = "CPU"
-    CUDA = "CUDA"
-    HIP = "HIP"
-    MPS = "MPS"
-    XLA = "XLA"
-    Meta = "Meta"
-    CompositeImplicitAutograd = "CompositeImplicitAutograd"
-    CompositeExplicitAutograd = "CompositeExplicitAutograd"
-    Autograd = "Autograd"
-    AutogradCPU = "AutogradCPU"
-    AutogradCUDA = "AutogradCUDA"
-
-
 @dataclass
 class Binding:
     """Cross-language binding with metadata."""
@@ -86,64 +70,16 @@ class CUDAKernel:
 
 @dataclass
 class BindingGraph:
-    """Cross-language binding graph with indexed lookups."""
+    """Container for detected bindings and CUDA kernels."""
 
     bindings: List[Binding] = field(default_factory=list)
     cuda_kernels: List[CUDAKernel] = field(default_factory=list)
-    _by_python_name: Dict[str, List[Binding]] = field(default_factory=dict)
-    _by_cpp_name: Dict[str, List[Binding]] = field(default_factory=dict)
-    _by_file: Dict[str, List[Binding]] = field(default_factory=dict)
-    _by_dispatch_key: Dict[str, List[Binding]] = field(default_factory=dict)
-    _kernels_by_name: Dict[str, CUDAKernel] = field(default_factory=dict)
 
     def add_binding(self, binding: Binding):
         self.bindings.append(binding)
 
-        # Index by Python name
-        self._by_python_name.setdefault(binding.python_name, []).append(binding)
-
-        # Index by C++ name
-        self._by_cpp_name.setdefault(binding.cpp_name, []).append(binding)
-
-        # Index by file
-        self._by_file.setdefault(binding.file_path, []).append(binding)
-
-        # Index by dispatch key
-        if binding.dispatch_key:
-            self._by_dispatch_key.setdefault(binding.dispatch_key, []).append(binding)
-
     def add_cuda_kernel(self, kernel: CUDAKernel):
         self.cuda_kernels.append(kernel)
-        self._kernels_by_name[kernel.name] = kernel
-
-    def find_by_python_name(self, name: str, partial: bool = True) -> List[Binding]:
-        if partial:
-            return [b for b in self.bindings if name.lower() in b.python_name.lower()]
-        return self._by_python_name.get(name, [])
-
-    def find_by_cpp_name(self, name: str, partial: bool = True) -> List[Binding]:
-        if partial:
-            return [b for b in self.bindings if name.lower() in b.cpp_name.lower()]
-        return self._by_cpp_name.get(name, [])
-
-    def find_dispatch_chain(self, function_name: str) -> Dict[str, List[Binding]]:
-        result = {}
-        for binding in self.find_by_python_name(function_name):
-            key = binding.dispatch_key or "default"
-            result.setdefault(key, []).append(binding)
-        return result
-
-    def find_cuda_kernel_for_function(self, function_name: str) -> List[CUDAKernel]:
-        kernels = []
-        for kernel in self.cuda_kernels:
-            if function_name.lower() in kernel.name.lower():
-                kernels.append(kernel)
-            # Also check callers
-            for caller in kernel.called_by:
-                if function_name.lower() in caller.lower():
-                    kernels.append(kernel)
-                    break
-        return kernels
 
 
 class BindingDetector:
