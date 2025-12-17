@@ -71,8 +71,3 @@ def relative_path(full_path: str, base: Optional[str] = None) -> str:
     return path
 
 
-def truncate(text: str, max_len: int = 80) -> str:
-    """Truncate text with ellipsis."""
-    if len(text) <= max_len:
-        return text
-    return text[: max_len - 3] + "..."

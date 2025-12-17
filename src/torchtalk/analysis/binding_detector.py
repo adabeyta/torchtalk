@@ -8,6 +8,8 @@ from pathlib import Path
 from enum import Enum
 import re
 
+from .config import should_exclude, has_binding_patterns
+
 log = logging.getLogger(__name__)
 
 
@@ -525,7 +527,13 @@ class BindingDetector:
         return content[node.start_byte : node.end_byte]
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
-        """Scan a directory for cross-language bindings."""
+        """Scan a directory for cross-language bindings.
+
+        Uses shared configuration from config.py for exclusion and binding patterns.
+
+        Args:
+            directory: Directory to scan
+        """
         dir_path = Path(directory)
         combined_graph = BindingGraph()
 
@@ -537,24 +545,30 @@ class BindingDetector:
 
         log.info(f"Scanning {len(files)} C++/CUDA files for bindings...")
 
+        skipped_excluded = 0
+        skipped_no_patterns = 0
         for cpp_file in files:
+            file_str = str(cpp_file)
+
+            # Apply exclusion patterns (from shared config)
+            if should_exclude(file_str):
+                skipped_excluded += 1
+                continue
+
             try:
                 content = cpp_file.read_text(encoding="utf-8", errors="replace")
 
-                # Quick check for relevant patterns
-                has_pybind = "PYBIND11_MODULE" in content or "pybind11" in content
-                has_torch_lib = "TORCH_LIBRARY" in content
-                has_cuda = "__global__" in content
-                has_dispatch = "AT_DISPATCH" in content
-
-                if not (has_pybind or has_torch_lib or has_cuda or has_dispatch):
+                # Fuzzy grep: check for binding-related patterns (from shared config)
+                if not has_binding_patterns(content):
+                    skipped_no_patterns += 1
                     continue
 
                 file_graph = self.detect_bindings(str(cpp_file), content)
 
-                if file_graph.bindings:
-                    log.info(
-                        f"   {cpp_file.name}: {len(file_graph.bindings)} bindings, {len(file_graph.cuda_kernels)} kernels"
+                if file_graph.bindings or file_graph.cuda_kernels:
+                    log.debug(
+                        f"   {cpp_file.name}: {len(file_graph.bindings)} bindings, "
+                        f"{len(file_graph.cuda_kernels)} kernels"
                     )
 
                     # Merge into combined graph
@@ -564,9 +578,11 @@ class BindingDetector:
                         combined_graph.add_cuda_kernel(kernel)
 
             except Exception as e:
-                log.warning(f"   Error parsing {cpp_file.name}: {e}")
+                log.warning(f"Error parsing {cpp_file.name}: {e}")
 
         log.info(
-            f"Total: {len(combined_graph.bindings)} bindings, {len(combined_graph.cuda_kernels)} CUDA kernels"
+            f"Total: {len(combined_graph.bindings)} bindings, "
+            f"{len(combined_graph.cuda_kernels)} CUDA kernels "
+            f"(skipped {skipped_excluded} excluded, {skipped_no_patterns} without patterns)"
         )
         return combined_graph
