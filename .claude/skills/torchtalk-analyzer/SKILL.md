@@ -1,141 +1,92 @@
 ---
 name: torchtalk-analyzer
-description: Get cross-language binding information for PyTorch codebases (Python → C++ → CUDA). Use when you need to understand dispatch paths, find backend implementations (CPU/CUDA), trace CUDA kernels, or understand how Python APIs connect to native code. Provides structural architectural data, not code search.
-allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__trace, mcp__torchtalk__search, mcp__torchtalk__impact, mcp__torchtalk__calls, mcp__torchtalk__called_by, mcp__torchtalk__cuda_kernels, Read, Grep, Glob
+description: Analyze PyTorch internals across Python, C++, and CUDA layers. Use when asked about how PyTorch operators work internally, where functions are implemented (CPU/CUDA backends), what would break if code is modified (impact analysis), how torch.nn modules connect to native code, or finding tests for PyTorch operators. Covers ATen ops, nn.Module classes, dispatch mechanisms, and test infrastructure.
+allowed-tools: mcp__torchtalk__get_status, mcp__torchtalk__trace, mcp__torchtalk__search, mcp__torchtalk__impact, mcp__torchtalk__calls, mcp__torchtalk__called_by, mcp__torchtalk__cuda_kernels, mcp__torchtalk__trace_module, mcp__torchtalk__list_modules, mcp__torchtalk__find_similar_tests, mcp__torchtalk__list_test_utils, mcp__torchtalk__test_file_info, Read, Grep, Glob
 ---
 
-# TorchTalk Cross-Language Binding Analyzer
+# TorchTalk PyTorch Analyzer
 
-## When to Use This Skill
+## When to Use
 
-Use TorchTalk when asked about:
-- How a PyTorch function works internally
-- What would break if something is modified (impact analysis)
-- Where a function is implemented (Python/C++/CUDA)
-- How Python APIs connect to native code
+- "How does torch.X work internally?"
+- "Where is X implemented?" (Python/C++/CUDA)
+- "What would break if I change X?"
+- "How does nn.Linear connect to native code?"
+- "Find tests for the softmax operator"
 
-## Quick Start: Check Status First
-
-If unsure what's available, start with:
-```
-get_status()
-```
-This shows what's loaded and any setup needed.
-
-## Primary Tools
-
-### `trace(function_name, focus?)`
-**Use for:** "How does X work?" / "Where is X implemented?"
-
-Shows complete Python → YAML → C++ → file mapping.
-- `focus="full"` (default): Everything
-- `focus="yaml"`: Just native_functions.yaml definition
-- `focus="dispatch"`: Just backend registrations
+## Quick Start
 
 ```
-trace("matmul")
-→ Definition from native_functions.yaml
-→ Dispatch: CompositeImplicitAutograd → matmul
-→ Implementation: aten/src/ATen/native/LinearAlgebra.cpp:1996
+get_status()  # Check what's loaded and available
 ```
 
-### `impact(function_name, depth?)` ⭐ Security/Refactoring
-**Use for:** "What would break if I change X?" / "What's the blast radius?"
+## Tools by Category
 
-Traces **transitive** callers up to `depth` levels (default 3, max 5).
-Also finds Python entry points that eventually call the target.
+### ATen Operators (torch.add, torch.matmul, etc.)
 
+| Tool | Use For |
+|------|---------|
+| `trace(name, focus?)` | Python → YAML → C++ → file:line |
+| `search(query, backend?)` | Find ops by name, filter by CPU/CUDA |
+| `cuda_kernels(name?)` | GPU kernel launches |
+
+### Call Graph Analysis (requires PyTorch build)
+
+| Tool | Use For |
+|------|---------|
+| `impact(name, depth?)` | What breaks if I change this? (transitive callers) |
+| `calls(name)` | What does this function call? |
+| `called_by(name)` | What calls this function? |
+
+### Python Modules (torch.nn, torch.optim)
+
+| Tool | Use For |
+|------|---------|
+| `trace_module(name)` | Trace nn.Linear, optim.Adam, etc. |
+| `list_modules(category)` | List available modules ("nn", "optim", "all") |
+
+### Test Infrastructure
+
+| Tool | Use For |
+|------|---------|
+| `find_similar_tests(query)` | Find tests for an operator/concept |
+| `list_test_utils(category)` | Available test utilities and patterns |
+| `test_file_info(path)` | Details about a specific test file |
+
+## Common Workflows
+
+### "How does torch.matmul work?"
 ```
-impact("gemm", depth=3)
-→ Depth 1: addmm, bmm, mm (direct callers)
-→ Depth 2: linear, matmul (callers of callers)
-→ Depth 3: transformer layers...
-→ Python Entry Points: torch.nn.Linear, torch.matmul
-```
-
-### `called_by(function_name)`
-**Use for:** "What directly calls X?" (single level)
-
-Shows immediate callers with file:line locations.
-
-```
-called_by("gemm")
-→ at::native::cpublas::brgemm at CPUBlas.cpp:1347
-→ at::native::addmm at LinearAlgebra.cpp:892
-```
-
-### `calls(function_name)`
-**Use for:** "What does X call internally?" / "What are X's dependencies?"
-
-Shows functions this calls with file:line locations.
-
-```
-calls("_matmul_impl")
-→ at::Tensor::mm, at::Tensor::mv, at::Tensor::dot
-```
-
-### `search(query, backend?)`
-**Use for:** "Find functions related to X"
-
-Search bindings by name with optional backend filter.
-
-```
-search("conv", backend="CUDA")
-→ Only CUDA implementations of conv-related functions
+trace("matmul")           # Get binding chain
+calls("matmul")           # See internal dependencies
 ```
 
-### `cuda_kernels(function_name?)`
-**Use for:** "What GPU kernels does X use?"
+### "What breaks if I modify GEMM?"
+```
+impact("gemm", depth=4)   # Transitive callers + Python entry points
+```
 
-Shows `__global__` CUDA kernels with `<<<>>>` launches.
+### "Where is conv2d for CUDA?"
+```
+search("conv2d", backend="CUDA")
+# or
+trace("conv2d", focus="dispatch")
+```
 
-## Workflow Examples
+### "How does nn.Linear work?"
+```
+trace_module("Linear")    # Python class details
+trace("linear")           # Underlying ATen op
+```
 
-### Example 1: "How does torch.matmul work?"
+### "Find tests for softmax"
+```
+find_similar_tests("softmax")
+```
 
-1. Get the binding chain:
-   ```
-   trace("matmul")
-   ```
-2. Get internal calls:
-   ```
-   calls("matmul")
-   ```
-3. Read the implementation file shown in results
-4. Answer with specific code references
+## Requirements
 
-### Example 2: "What would break if I modify the GEMM implementation?"
+- **Always available:** trace, search, cuda_kernels, trace_module, list_modules, test tools
+- **Requires PyTorch build:** impact, calls, called_by (need `compile_commands.json`)
 
-1. Get full impact analysis:
-   ```
-   impact("gemm", depth=4)
-   ```
-2. Review Python entry points to understand user-facing impact
-3. Explain the impact chain from low-level to high-level
-
-### Example 3: "Where is conv2d implemented for CUDA?"
-
-1. Search with backend filter:
-   ```
-   search("conv2d", backend="CUDA")
-   ```
-2. Or get full trace:
-   ```
-   trace("conv2d", focus="dispatch")
-   ```
-3. Read the CUDA file
-
-## Tool Status
-
-Some tools require `compile_commands.json` (generated by building PyTorch):
-
-| Tool | Requires Build? | Purpose |
-|------|----------------|---------|
-| `trace` | No | Python→C++ mapping |
-| `search` | No | Find bindings |
-| `cuda_kernels` | No | GPU kernels |
-| `impact` | **Yes** | Transitive callers |
-| `calls` | **Yes** | Outbound dependencies |
-| `called_by` | **Yes** | Inbound dependencies |
-
-If call graph tools return "not available", the user needs to build PyTorch once. Use `get_status()` for guidance.
+Run `get_status()` to check availability.
