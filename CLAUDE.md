@@ -65,6 +65,8 @@ All data cached to `~/.cache/torchtalk/`:
 
 ## MCP Tools
 
+**IMPORTANT**: Use the `mcp__torchtalk__*` tools directly (e.g., `mcp__torchtalk__trace`). Do NOT try to import or run Python code from `torchtalk.server` manually.
+
 ### ATen Operators
 | Tool | Description |
 |------|-------------|
