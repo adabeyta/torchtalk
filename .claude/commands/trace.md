@@ -1,13 +1,13 @@
 ---
 argument-hint: [function-name]
 description: Trace a PyTorch function's cross-language binding chain
-allowed-tools: mcp__torchtalk__get_binding_chain, mcp__torchtalk__get_implementation_files, Read
+allowed-tools: mcp__torchtalk__trace, mcp__torchtalk__calls, Read
 ---
 
 Trace the PyTorch function `$ARGUMENTS`:
 
-1. Use `get_binding_chain` to find the Python → C++ → CUDA mapping
-2. Use `get_implementation_files` to get all relevant file paths
-3. Summarize the dispatch path clearly
+1. Use `trace("$ARGUMENTS")` to get the Python → YAML → C++ binding chain
+2. If available, use `calls("$ARGUMENTS")` to show internal dependencies
+3. Summarize the dispatch path and implementation locations
 
-Show the complete binding chain from Python API to native implementation.
+Show file:line references for each layer.

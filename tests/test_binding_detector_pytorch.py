@@ -1,248 +1,151 @@
-#!/usr/bin/env python3
 """
-Test the enhanced BindingDetector against the actual PyTorch repository.
+Test BindingDetector against the actual PyTorch repository.
+
+Requires PYTORCH_SOURCE or PYTORCH_PATH environment variable to be set.
+
+Usage:
+    PYTORCH_SOURCE=/path/to/pytorch pytest tests/test_binding_detector_pytorch.py -v
 """
 
-import sys
+import os
 from pathlib import Path
 
-# Add torchtalk to path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+import pytest
 
 from torchtalk.analysis.binding_detector import BindingDetector, BindingType
 
-PYTORCH_PATH = Path("/myworkspace/pytorch")
+
+def get_pytorch_path() -> Path | None:
+    """Get PyTorch path from environment variable."""
+    for var in ("PYTORCH_SOURCE", "PYTORCH_PATH"):
+        if path := os.environ.get(var):
+            p = Path(path)
+            if p.exists() and (p / "torch").exists():
+                return p
+    return None
 
 
-def test_pybind11_detection():
-    """Test detection of pybind11 patterns in PyTorch"""
-    print("\n" + "="*60)
-    print("TEST: pybind11 Detection")
-    print("="*60)
+PYTORCH_PATH = get_pytorch_path()
 
-    detector = BindingDetector()
-
-    # Find a file with PYBIND11_MODULE
-    test_files = [
-        PYTORCH_PATH / "torch/csrc/Module.cpp",
-        PYTORCH_PATH / "torch/csrc/autograd/python_variable.cpp",
-    ]
-
-    for test_file in test_files:
-        if test_file.exists():
-            print(f"\nParsing: {test_file.name}")
-            content = test_file.read_text(errors='replace')
-
-            graph = detector.detect_bindings(str(test_file), content)
-
-            print(f"  Found {len(graph.bindings)} bindings")
-
-            # Show first few bindings
-            for b in graph.bindings[:5]:
-                print(f"    - [{b.binding_type}] {b.python_name} -> {b.cpp_name}")
-
-            if len(graph.bindings) > 5:
-                print(f"    ... and {len(graph.bindings) - 5} more")
-
-            return len(graph.bindings) > 0
-
-    print("  No test files found")
-    return False
+pytestmark = pytest.mark.skipif(
+    PYTORCH_PATH is None,
+    reason="PYTORCH_SOURCE or PYTORCH_PATH environment variable not set",
+)
 
 
-def test_torch_library_detection():
-    """Test detection of TORCH_LIBRARY patterns"""
-    print("\n" + "="*60)
-    print("TEST: TORCH_LIBRARY Detection")
-    print("="*60)
-
-    detector = BindingDetector()
-
-    # Use a known file that has TORCH_LIBRARY_FRAGMENT
-    test_file = PYTORCH_PATH / "aten/src/ATen/native/RNN.cpp"
-
-    if not test_file.exists():
-        print(f"  Test file not found: {test_file}")
-        return False
-
-    print(f"Parsing: {test_file.relative_to(PYTORCH_PATH)}")
-    content = test_file.read_text(errors='replace')
-    graph = detector.detect_bindings(str(test_file), content)
-
-    torch_lib_bindings = [b for b in graph.bindings
-                           if 'torch' in b.binding_type.lower()]
-
-    if torch_lib_bindings:
-        print(f"  Found {len(torch_lib_bindings)} TORCH_LIBRARY bindings")
-
-        for b in torch_lib_bindings[:5]:
-            dispatch = f" [{b.dispatch_key}]" if b.dispatch_key else ""
-            print(f"    - {b.python_name}{dispatch} -> {b.cpp_name}")
-
-        if len(torch_lib_bindings) > 5:
-            print(f"    ... and {len(torch_lib_bindings) - 5} more")
-        return True
-
-    print("  No TORCH_LIBRARY bindings found")
-    return False
+@pytest.fixture
+def detector():
+    """Create a BindingDetector instance."""
+    return BindingDetector()
 
 
-def test_cuda_kernel_detection():
-    """Test detection of CUDA kernels"""
-    print("\n" + "="*60)
-    print("TEST: CUDA Kernel Detection")
-    print("="*60)
+class TestPybind11Detection:
+    """Tests for pybind11 pattern detection."""
 
-    detector = BindingDetector()
+    def test_detects_bindings_in_module_cpp(self, detector):
+        """Should detect pybind11 bindings in torch/csrc/Module.cpp."""
+        test_file = PYTORCH_PATH / "torch/csrc/Module.cpp"
+        if not test_file.exists():
+            pytest.skip(f"Test file not found: {test_file}")
 
-    # Find CUDA files
-    cuda_dir = PYTORCH_PATH / "aten/src/ATen/native/cuda"
+        content = test_file.read_text(errors="replace")
+        graph = detector.detect_bindings(str(test_file), content)
 
-    if not cuda_dir.exists():
-        print(f"  Directory not found: {cuda_dir}")
-        return False
+        assert len(graph.bindings) > 0, "Should find pybind11 bindings"
 
-    found_any = False
-    for cu_file in list(cuda_dir.glob("*.cu"))[:20]:
-        content = cu_file.read_text(errors='replace')
 
-        if '__global__' in content:
-            print(f"\nParsing: {cu_file.name}")
+class TestTorchLibraryDetection:
+    """Tests for TORCH_LIBRARY pattern detection."""
+
+    def test_detects_torch_library_in_rnn(self, detector):
+        """Should detect TORCH_LIBRARY bindings in RNN.cpp."""
+        test_file = PYTORCH_PATH / "aten/src/ATen/native/RNN.cpp"
+        if not test_file.exists():
+            pytest.skip(f"Test file not found: {test_file}")
+
+        content = test_file.read_text(errors="replace")
+        graph = detector.detect_bindings(str(test_file), content)
+
+        torch_lib_bindings = [
+            b for b in graph.bindings if "torch" in b.binding_type.lower()
+        ]
+        assert len(torch_lib_bindings) > 0, "Should find TORCH_LIBRARY bindings"
+
+
+class TestCudaKernelDetection:
+    """Tests for CUDA kernel detection."""
+
+    def test_detects_cuda_kernels(self, detector):
+        """Should detect __global__ CUDA kernels in .cu files."""
+        cuda_dir = PYTORCH_PATH / "aten/src/ATen/native/cuda"
+        if not cuda_dir.exists():
+            pytest.skip(f"CUDA directory not found: {cuda_dir}")
+
+        found_kernels = False
+        for cu_file in list(cuda_dir.glob("*.cu"))[:20]:
+            content = cu_file.read_text(errors="replace")
+            if "__global__" not in content:
+                continue
+
             graph = detector.detect_bindings(str(cu_file), content)
-
             if graph.cuda_kernels:
-                found_any = True
-                print(f"  Found {len(graph.cuda_kernels)} CUDA kernels")
-
-                for k in graph.cuda_kernels[:5]:
-                    callers = f" (called by: {', '.join(k.called_by[:2])})" if k.called_by else ""
-                    print(f"    - __global__ {k.name}{callers}")
-
-                if len(graph.cuda_kernels) > 5:
-                    print(f"    ... and {len(graph.cuda_kernels) - 5} more")
+                found_kernels = True
                 break
 
-    return found_any
+        assert found_kernels, "Should find CUDA kernels in at least one .cu file"
 
 
-def test_at_dispatch_detection():
-    """Test detection of AT_DISPATCH macros"""
-    print("\n" + "="*60)
-    print("TEST: AT_DISPATCH Detection")
-    print("="*60)
+class TestAtDispatchDetection:
+    """Tests for AT_DISPATCH macro detection."""
 
-    detector = BindingDetector()
+    def test_detects_at_dispatch_macros(self, detector):
+        """Should detect AT_DISPATCH macros in native ops."""
+        native_dir = PYTORCH_PATH / "aten/src/ATen/native"
+        if not native_dir.exists():
+            pytest.skip(f"Native directory not found: {native_dir}")
 
-    native_dir = PYTORCH_PATH / "aten/src/ATen/native"
+        found_dispatch = False
+        for cpp_file in list(native_dir.glob("*.cpp"))[:30]:
+            content = cpp_file.read_text(errors="replace")
+            if "AT_DISPATCH" not in content:
+                continue
 
-    if not native_dir.exists():
-        print(f"  Directory not found: {native_dir}")
-        return False
-
-    found_any = False
-    for cpp_file in list(native_dir.glob("*.cpp"))[:30]:
-        content = cpp_file.read_text(errors='replace')
-
-        if 'AT_DISPATCH' in content:
-            print(f"\nParsing: {cpp_file.name}")
             graph = detector.detect_bindings(str(cpp_file), content)
-
-            at_dispatch_bindings = [b for b in graph.bindings
-                                     if b.binding_type == BindingType.AT_DISPATCH.value]
-
-            if at_dispatch_bindings:
-                found_any = True
-                print(f"  Found {len(at_dispatch_bindings)} AT_DISPATCH macros")
-
-                for b in at_dispatch_bindings[:5]:
-                    print(f"    - {b.python_name} in {b.cpp_name}")
-                    if b.signature:
-                        print(f"      {b.signature}")
-
-                if len(at_dispatch_bindings) > 5:
-                    print(f"    ... and {len(at_dispatch_bindings) - 5} more")
+            at_dispatch = [
+                b
+                for b in graph.bindings
+                if b.binding_type == BindingType.AT_DISPATCH.value
+            ]
+            if at_dispatch:
+                found_dispatch = True
                 break
 
-    return found_any
+        assert found_dispatch, "Should find AT_DISPATCH macros"
 
 
-def test_full_directory_scan():
-    """Test scanning a portion of PyTorch"""
-    print("\n" + "="*60)
-    print("TEST: Directory Scan (torch/csrc subset)")
-    print("="*60)
+class TestDirectoryScan:
+    """Tests for full directory scanning."""
 
-    detector = BindingDetector()
+    def test_scans_autograd_directory(self, detector):
+        """Should scan torch/csrc/autograd and find bindings."""
+        scan_dir = PYTORCH_PATH / "torch/csrc/autograd"
+        if not scan_dir.exists():
+            pytest.skip(f"Directory not found: {scan_dir}")
 
-    # Scan a subset to keep it fast
-    scan_dir = PYTORCH_PATH / "torch/csrc/autograd"
+        graph = detector.detect_bindings_in_directory(str(scan_dir))
 
-    if not scan_dir.exists():
-        print(f"  Directory not found: {scan_dir}")
-        return False
+        assert len(graph.bindings) > 0, "Should find bindings in autograd directory"
 
-    print(f"Scanning: {scan_dir}")
-    graph = detector.detect_bindings_in_directory(str(scan_dir))
+    def test_categorizes_bindings_by_type(self, detector):
+        """Should categorize bindings by their type."""
+        scan_dir = PYTORCH_PATH / "torch/csrc/autograd"
+        if not scan_dir.exists():
+            pytest.skip(f"Directory not found: {scan_dir}")
 
-    print(f"\nResults:")
-    print(f"  Total bindings: {len(graph.bindings)}")
-    print(f"  CUDA kernels: {len(graph.cuda_kernels)}")
+        graph = detector.detect_bindings_in_directory(str(scan_dir))
 
-    # Count by type
-    by_type = {}
-    for b in graph.bindings:
-        by_type[b.binding_type] = by_type.get(b.binding_type, 0) + 1
+        by_type = {}
+        for b in graph.bindings:
+            by_type[b.binding_type] = by_type.get(b.binding_type, 0) + 1
 
-    print(f"\n  By type:")
-    for t, count in sorted(by_type.items(), key=lambda x: -x[1]):
-        print(f"    {t}: {count}")
-
-    # Count by dispatch key
-    by_dispatch = {}
-    for b in graph.bindings:
-        key = b.dispatch_key or "none"
-        by_dispatch[key] = by_dispatch.get(key, 0) + 1
-
-    if len(by_dispatch) > 1:
-        print(f"\n  By dispatch key:")
-        for k, count in sorted(by_dispatch.items(), key=lambda x: -x[1]):
-            print(f"    {k}: {count}")
-
-    return len(graph.bindings) > 0
-
-
-def main():
-    """Run all tests"""
-    print("\n" + "#"*60)
-    print("# Testing BindingDetector on PyTorch Repository")
-    print("#"*60)
-
-    if not PYTORCH_PATH.exists():
-        print(f"\nERROR: PyTorch not found at {PYTORCH_PATH}")
-        return 1
-
-    results = {}
-
-    results["pybind11"] = test_pybind11_detection()
-    results["torch_library"] = test_torch_library_detection()
-    results["cuda_kernels"] = test_cuda_kernel_detection()
-    results["at_dispatch"] = test_at_dispatch_detection()
-    results["directory_scan"] = test_full_directory_scan()
-
-    # Summary
-    print("\n" + "="*60)
-    print("SUMMARY")
-    print("="*60)
-
-    all_passed = True
-    for test_name, passed in results.items():
-        status = "✓ PASS" if passed else "✗ FAIL"
-        print(f"  {status}: {test_name}")
-        if not passed:
-            all_passed = False
-
-    return 0 if all_passed else 1
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+        assert len(by_type) > 1, "Should find multiple binding types"

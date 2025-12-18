@@ -13,6 +13,7 @@ pip install -e ".[dev]"
 
 # Run tests
 pytest
+PYTORCH_SOURCE=/path/to/pytorch pytest tests/test_binding_detector_pytorch.py
 
 # Run MCP server directly
 python -m torchtalk mcp-serve --pytorch-source /path/to/pytorch
@@ -24,10 +25,13 @@ python -m torchtalk mcp-serve --pytorch-source /path/to/pytorch
 src/torchtalk/
 ├── server.py              # MCP server - main entry point for Claude Code
 ├── cli.py                 # CLI (`torchtalk mcp-serve`)
+├── formatting.py          # Markdown output formatting
 └── analysis/
     ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection (tree-sitter)
     ├── cpp_call_graph.py      # C++ call graph extraction (libclang)
-    └── repo_analyzer.py       # Python import/call graphs (AST)
+    ├── python_analyzer.py     # Python module/class analysis (AST)
+    ├── config.py              # Search directories, exclusion patterns
+    └── helpers.py             # Utility functions
 ```
 
 ## Architecture
@@ -44,7 +48,7 @@ TorchTalk is an MCP server providing cross-language binding analysis for PyTorch
 **Analysis Modules** (`src/torchtalk/analysis/`):
 - `BindingDetector`: Parses C++ for pybind11 patterns using tree-sitter
 - `CppCallGraphExtractor`: Parallel libclang-based call graph (60K+ functions)
-- `RepoAnalyzer`: Python AST analysis for import/call graphs
+- `PythonAnalyzer`: Python AST analysis for modules, classes, nn.Module subclasses
 
 ### Data Sources
 
@@ -61,14 +65,32 @@ All data cached to `~/.cache/torchtalk/`:
 
 ## MCP Tools
 
+### ATen Operators
 | Tool | Description |
 |------|-------------|
 | `trace(func, focus?)` | Python → YAML → C++ → file:line. Focus: "full", "yaml", "dispatch" |
 | `search(query, backend?)` | Find bindings by name with optional backend filter |
+| `cuda_kernels(func?)` | GPU kernel launches with file:line |
+
+### Call Graph (requires PyTorch build)
+| Tool | Description |
+|------|-------------|
 | `impact(func, depth?)` | Transitive callers + Python entry points |
 | `calls(func)` | Outbound: functions `func` invokes |
 | `called_by(func)` | Inbound: functions that invoke `func` |
-| `cuda_kernels(func?)` | GPU kernel launches with file:line |
+
+### Python Modules
+| Tool | Description |
+|------|-------------|
+| `trace_module(name)` | Trace torch.nn.Linear, torch.optim.Adam, etc. |
+| `list_modules(category)` | List nn.Module classes, optimizers ("nn", "optim", "all") |
+
+### Test Infrastructure
+| Tool | Description |
+|------|-------------|
+| `find_similar_tests(query)` | Find tests for an operator/concept |
+| `list_test_utils(category)` | List test utilities and patterns |
+| `test_file_info(path)` | Details about a specific test file |
 
 ## Key Files
 
