@@ -3,7 +3,6 @@
 import hashlib
 import json
 import logging
-import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -19,7 +18,7 @@ from .analysis.helpers import (
     dedupe_by_key,
     truncate,
 )
-from .analysis.config import (
+from .analysis.patterns import (
     CPP_SEARCH_DIRS,
     PYTHON_SEARCH_DIRS,
     TEST_SEARCH_DIRS,
@@ -27,11 +26,10 @@ from .analysis.config import (
     should_exclude as _should_exclude,
     has_test_patterns as _has_test_patterns,
 )
+from .config import CACHE_DIR, cache_paths, resolve_pytorch_source, source_hash
 
 log = logging.getLogger(__name__)
 mcp = FastMCP("torchtalk")
-
-CACHE_DIR = Path.home() / ".cache" / "torchtalk"
 
 
 @dataclass
@@ -72,8 +70,7 @@ _state = ServerState()
 
 def _cache_path(source: str) -> Path:
     """Get cache file path for source directory."""
-    path_hash = hashlib.md5(str(Path(source).resolve()).encode()).hexdigest()[:12]
-    return CACHE_DIR / f"bindings_{path_hash}.json"
+    return cache_paths(source)["bindings"]
 
 
 def _source_fingerprint(source: str) -> str:
@@ -394,11 +391,10 @@ def _init_cpp_call_graph(source: str):
             log.info("libclang not available - C++ call graph disabled")
             return
 
-        src = Path(source)
-        path_hash = hashlib.md5(str(src.resolve()).encode()).hexdigest()[:12]
-        cache_key = f"pytorch_callgraph_parallel_{path_hash}"
+        cg_cache_dir = CACHE_DIR / "call_graph"
+        cache_key = f"pytorch_callgraph_parallel_{source_hash(source)}"
 
-        extractor = CppCallGraphExtractor()
+        extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
         if extractor.load_cache(cache_key):
             _state.cpp_extractor = extractor
             log.info(
@@ -412,7 +408,7 @@ def _init_cpp_call_graph(source: str):
         def build():
             global _state
             try:
-                ext = CppCallGraphExtractor()
+                ext = CppCallGraphExtractor(cache_dir=cg_cache_dir)
                 ext.extract_from_pytorch_parallel(source)
                 ext.save_cache(cache_key)
                 _state.cpp_extractor = ext
@@ -725,18 +721,12 @@ def _parse_opinfo_registry(opinfo_path: str):
 
 
 def _auto_detect_pytorch() -> Optional[str]:
-    """Auto-detect PyTorch source."""
-    candidates = [
-        os.environ.get("PYTORCH_SOURCE"),
-        os.environ.get("PYTORCH_PATH"),
-        Path.cwd() / "pytorch",
-        Path.cwd().parent / "pytorch",
-        Path("/myworkspace/pytorch"),
-    ]
-    for c in candidates:
-        if c and Path(c).exists() and (Path(c) / "torch").exists():
-            return str(c)
-    return None
+    """Auto-detect PyTorch source using 3-level resolution.
+
+    Priority: PYTORCH_SOURCE env var > config.toml > None
+    CLI flag is handled upstream in run_server().
+    """
+    return resolve_pytorch_source()
 
 
 # --- Helpers ---

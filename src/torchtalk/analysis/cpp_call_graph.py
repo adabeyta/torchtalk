@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Set, Tuple, Any
 from collections import defaultdict
 from multiprocessing import Pool, cpu_count
 
-from .config import CPP_SEARCH_DIRS, should_exclude, should_include_dir
+from .patterns import CPP_SEARCH_DIRS, should_exclude, should_include_dir
 from .helpers import levenshtein_distance
 
 log = logging.getLogger(__name__)

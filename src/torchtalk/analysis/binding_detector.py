@@ -8,7 +8,7 @@ from pathlib import Path
 from enum import Enum
 import re
 
-from .config import should_exclude, has_binding_patterns
+from .patterns import should_exclude, has_binding_patterns
 
 log = logging.getLogger(__name__)
 

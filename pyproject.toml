@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "torchtalk"
-version = "3.0.0"
+version = "1.0.0"
 description = "MCP server providing cross-language binding analysis for PyTorch codebases (Python/C++/CUDA)"
 readme = "README.md"
 # license = "MIT"  # Add when ready to publish
@@ -37,6 +37,9 @@ dependencies = [
     "pyyaml>=6.0",
     "libclang>=16.0.0",
     "mcp>=1.0.0",
+    "platformdirs>=4.0",
+    "tomli-w>=1.0",
+    "tomli>=2.0; python_version < '3.11'",
 ]
 
 [project.optional-dependencies]
