@@ -12,6 +12,8 @@ The MCP server automatically builds and caches the binding index on first run.
 import argparse
 import logging
 import sys
+import shutil
+import json
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -135,6 +137,75 @@ def cmd_mcp_serve(args):
         index_path=args.index,
         transport=args.transport,
     )
+    return 0
+
+
+def cmd_cursor_add(args):
+    """Add torchtalk MCP server to Cursor and copy .claude/ to project .cursor/."""
+    MCP_CONFIG_NAME = "mcp.json"
+    project_root = Path(args.project_dir).resolve()
+    if not project_root.is_dir():
+        log.error("Project directory is not a directory: %s", project_root)
+        return 1
+
+    cursor_dir = project_root / ".cursor"
+    cursor_dir.mkdir(parents=True, exist_ok=True)
+
+    # Copy torchtalk's .claude/ contents into project_dir/.cursor/
+    pkg_root = Path(__file__).resolve().parent.parent.parent
+    claude_src = pkg_root / ".claude"
+    if claude_src.is_dir():
+        for item in claude_src.iterdir():
+            dest = cursor_dir / item.name
+            if item.is_dir():
+                shutil.copytree(item, dest, dirs_exist_ok=True)
+            else:
+                shutil.copy2(item, dest)
+        print(f"Copied .claude/ to {cursor_dir}")
+    else:
+        log.warning("No .claude/ found at %s; skipping copy", claude_src)
+
+    # MCP config: project or user
+    if args.global_config:
+        config_dir = Path.home() / ".cursor"
+        config_path = config_dir / MCP_CONFIG_NAME
+    else:
+        config_path = cursor_dir / MCP_CONFIG_NAME
+
+    pytorch_source = Path(args.pytorch_source).resolve()
+    if not pytorch_source.is_dir():
+        log.error("PyTorch source path is not a directory: %s", pytorch_source)
+        return 1
+
+    if config_path.exists():
+        try:
+            data = json.loads(config_path.read_text())
+        except (json.JSONDecodeError, OSError) as e:
+            log.error("Could not read %s: %s", config_path, e)
+            return 1
+    else:
+        data = {}
+
+    if "mcpServers" not in data:
+        data["mcpServers"] = {}
+
+    data["mcpServers"]["torchtalk"] = {
+        "command": "torchtalk",
+        "args": ["mcp-serve", "--pytorch-source", str(pytorch_source)],
+    }
+
+    config_dir = config_path.parent
+    config_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        config_path.write_text(json.dumps(data, indent=2) + "\n")
+    except OSError as e:
+        log.error("Could not write %s: %s", config_path, e)
+        return 1
+
+    scope = "user config" if args.global_config else "project"
+    print(f"Added torchtalk to {scope} at {config_path}")
+    print("Restart Cursor (or reload the window) to load the MCP server.")
+    return 0
 
 
 def main():
@@ -209,6 +280,31 @@ First run builds the index (a few minutes); subsequent runs use cache.
     )
     parser_mcp.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser_mcp.set_defaults(func=cmd_mcp_serve)
+
+    # Cursor: add MCP to .cursor/mcp.json
+    parser_cursor = subparsers.add_parser(
+        "cursor-add",
+        help="Add torchtalk MCP to Cursor's .cursor/mcp.json",
+    )
+    parser_cursor.add_argument(
+        "--project-dir",
+        "-C",
+        required=True,
+        help="Project root: .cursor/mcp.json and .claude contents are written here",
+    )
+    parser_cursor.add_argument(
+        "--pytorch-source",
+        "-p",
+        required=True,
+        help="Path to PyTorch source tree",
+    )
+    parser_cursor.add_argument(
+        "--global",
+        dest="global_config",
+        action="store_true",
+        help="Write to ~/.cursor/mcp.json (user-wide) instead of project .cursor/mcp.json",
+    )
+    parser_cursor.set_defaults(func=cmd_cursor_add)
 
     args = parser.parse_args()
 
