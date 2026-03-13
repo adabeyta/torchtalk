@@ -20,6 +20,9 @@ pip install -e .
 
 # Add to Claude Code (one command)
 claude mcp add torchtalk -s user -- torchtalk mcp-serve --pytorch-source /path/to/pytorch
+
+# Add to Cursor: copies .claude/ into the project's .cursor/ and adds the torchtalk MCP
+torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 ```
 
 ## Requirements
