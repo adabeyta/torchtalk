@@ -163,7 +163,8 @@ def cmd_cursor_add(args):
                 shutil.copy2(item, dest)
         print(f"Copied .claude/ to {cursor_dir}")
     else:
-        log.warning("No .claude/ found at %s; skipping copy", claude_src)
+        log.error("Setup failed: no .claude/ directory found at %s", claude_src)
+        return 1
 
     # MCP config: project or user
     if args.global_config:
