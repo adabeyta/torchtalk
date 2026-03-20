@@ -10,7 +10,7 @@ from typing import Optional, Dict, List, Any, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
-from .formatting import Markdown, relative_path
+from .formatting import Markdown, relative_path, create_formatter
 from .analysis.helpers import (
     levenshtein_distance,
     fuzzy_match,
@@ -801,7 +801,7 @@ def _format_call_item(
 @mcp.tool()
 async def get_status() -> str:
     """Get TorchTalk status and available tools."""
-    md = Markdown()
+    md = create_formatter()
     md.h2("TorchTalk Status")
 
     # Source
@@ -907,19 +907,10 @@ async def get_status() -> str:
 
 @mcp.tool()
 async def trace(function_name: str, focus: str = "full") -> str:
-    """
-    Trace a PyTorch function from Python API to C++ implementation.
-
-    Args:
-        function_name: Function to trace (e.g., "add", "matmul", "softmax")
-        focus: Level of detail - "full" (default), "yaml" (definition only), "dispatch" (backends only)
-
-    Returns:
-        Binding chain with file:line locations for each layer.
-    """
+    """Trace a PyTorch function from Python API to C++ implementation with file:line locations."""
     _ensure_loaded()
 
-    md = Markdown()
+    md = create_formatter()
     md.h2(f"Trace: `{function_name}`")
 
     native = _get_native_func(function_name)
@@ -1043,30 +1034,21 @@ async def trace(function_name: str, focus: str = "full") -> str:
         similar = _similar_functions(function_name)
         if similar:
             md.h3("Function Not Found")
-            md.text(f"No exact match for `{function_name}`. Did you mean:")
-            for s in similar[:8]:
+            md.text(f"No exact match for `{function_name}`. Similar functions:")
+            for s in similar[:5]:
                 md.item(f"`{s}`")
         else:
             md.text(f"Function `{function_name}` not found in PyTorch bindings.")
-            md.text("\nTry using `search()` to find related functions.")
 
     return md.build()
 
 
 @mcp.tool()
 async def cuda_kernels(function_name: str = "") -> str:
-    """
-    Find CUDA kernel launches (<<<grid, block>>>) in PyTorch.
-
-    Args:
-        function_name: Optional filter - search for kernels matching this name
-
-    Returns:
-        CUDA kernel locations with file:line and caller information.
-    """
+    """Find CUDA kernel launches in PyTorch, optionally filtered by function name."""
     _ensure_loaded()
 
-    md = Markdown()
+    md = create_formatter()
     title = f"CUDA Kernels: '{function_name}'" if function_name else "CUDA Kernels"
     md.h2(title)
 
@@ -1099,18 +1081,8 @@ async def cuda_kernels(function_name: str = "") -> str:
 
 
 @mcp.tool()
-async def search(query: str, backend: str = "", limit: int = 20) -> str:
-    """
-    Search PyTorch bindings by name with optional backend filter.
-
-    Args:
-        query: Search term (fuzzy matches Python and C++ names)
-        backend: Optional filter - "CPU", "CUDA", "Meta", etc.
-        limit: Max results to return (default 20)
-
-    Returns:
-        Matching bindings with dispatch keys and file locations.
-    """
+async def search(query: str, backend: str = "", limit: int = 10) -> str:
+    """Search PyTorch bindings by name with optional backend filter (CPU, CUDA, Meta, etc.)."""
     _ensure_loaded()
 
     query_lower = query.lower()
@@ -1147,7 +1119,7 @@ async def search(query: str, backend: str = "", limit: int = 20) -> str:
             seen.add(key)
             unique.append(m)
 
-    md = Markdown()
+    md = create_formatter()
     filter_msg = f" (backend: {backend})" if backend else ""
     md.h2(f"Search: '{query}'{filter_msg}")
     md.text(f"Found {len(unique)} binding(s)\n")
@@ -1168,15 +1140,7 @@ async def search(query: str, backend: str = "", limit: int = 20) -> str:
 
 @mcp.tool()
 async def calls(function_name: str) -> str:
-    """
-    Find functions that this function calls (outbound dependencies).
-
-    Args:
-        function_name: C++ function to analyze
-
-    Returns:
-        List of called functions with file:line locations.
-    """
+    """Find functions that a C++ function calls (outbound dependencies)."""
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -1187,30 +1151,22 @@ async def calls(function_name: str) -> str:
 
     results = dedupe_by_key(callees, "callee")
 
-    md = Markdown()
+    md = create_formatter()
     md.h2(f"Calls: `{function_name}`")
     md.text("*Functions this calls (outbound dependencies):*\n")
 
-    for item in results[:30]:
+    for item in results[:15]:
         _format_call_item(md, item, "callee", "callee_file", "callee_line")
 
-    if len(results) > 30:
-        md.text(f"\n*Showing 30 of {len(results)} calls*")
+    if len(results) > 15:
+        md.text(f"\n*Showing 15 of {len(results)} calls.*")
 
     return md.build()
 
 
 @mcp.tool()
 async def called_by(function_name: str) -> str:
-    """
-    Find functions that call this function (inbound dependents).
-
-    Args:
-        function_name: C++ function to analyze
-
-    Returns:
-        List of calling functions with file:line locations.
-    """
+    """Find functions that call a C++ function (inbound dependents)."""
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -1221,36 +1177,22 @@ async def called_by(function_name: str) -> str:
 
     results = dedupe_by_key(callers, "caller")
 
-    md = Markdown()
+    md = create_formatter()
     md.h2(f"Called by: `{function_name}`")
     md.text("*Functions that call this (inbound dependents):*\n")
 
-    for item in results[:30]:
+    for item in results[:15]:
         _format_call_item(md, item, "caller", "caller_file", "caller_line")
 
-    if len(results) > 30:
-        md.text(f"\n*Showing 30 of {len(results)} callers*")
+    if len(results) > 15:
+        md.text(f"\n*Showing 15 of {len(results)} callers.*")
 
     return md.build()
 
 
 @mcp.tool()
-async def impact(function_name: str, depth: int = 3) -> str:
-    """
-    Analyze the impact of modifying a function (transitive callers).
-
-    Traces all code paths that depend on this function, useful for:
-    - Security: Understanding vulnerability exposure
-    - Refactoring: Knowing what might break
-    - Testing: Identifying affected test coverage
-
-    Args:
-        function_name: C++ function to analyze
-        depth: How many levels of callers to trace (default 3, max 5)
-
-    Returns:
-        Transitive callers grouped by depth, plus Python entry points if found.
-    """
+async def impact(function_name: str, depth: int = 2, focus: str = "callers") -> str:
+    """Analyze the impact of modifying a C++ function by tracing transitive callers. Focus: 'callers' (default), 'full' (includes Python entry points)."""
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -1283,7 +1225,7 @@ async def impact(function_name: str, depth: int = 3) -> str:
     if not callers_by_depth:
         return f"No callers found for '{function_name}'."
 
-    md = Markdown()
+    md = create_formatter()
     md.h2(f"Impact Analysis: `{function_name}`")
     md.text(f"*Tracing callers up to {depth} levels deep*\n")
 
@@ -1301,30 +1243,28 @@ async def impact(function_name: str, depth: int = 3) -> str:
             md.item(f"*... and {len(unique) - 15} more*")
         md.blank()
 
-    # Find Python entry points
-    python_entries = [
-        {
-            "python": b.get("python_name", c),
-            "cpp": c,
-            "dispatch": b.get("dispatch_key", ""),
-        }
-        for c in visited
-        if c in _state.by_cpp_name
-        for b in _state.by_cpp_name[c][:1]
-    ]
+    if focus == "full":
+        python_entries = [
+            {
+                "python": b.get("python_name", c),
+                "cpp": c,
+                "dispatch": b.get("dispatch_key", ""),
+            }
+            for c in visited
+            if c in _state.by_cpp_name
+            for b in _state.by_cpp_name[c][:1]
+        ]
 
-    if python_entries:
-        md.h3(f"Python Entry Points ({len(python_entries)} found)")
-        md.text("*These Python APIs eventually call the target function:*\n")
-        for entry in python_entries[:10]:
-            dispatch = f" [{entry['dispatch']}]" if entry["dispatch"] else ""
-            md.item(f"`{entry['python']}`{dispatch} → `{entry['cpp']}`")
-        if len(python_entries) > 10:
-            md.item(f"*... and {len(python_entries) - 10} more*")
+        if python_entries:
+            md.h3(f"Python Entry Points ({len(python_entries)} found)")
+            for entry in python_entries[:10]:
+                dispatch = f" [{entry['dispatch']}]" if entry["dispatch"] else ""
+                md.item(f"`{entry['python']}`{dispatch} → `{entry['cpp']}`")
+            if len(python_entries) > 10:
+                md.item(f"*... and {len(python_entries) - 10} more*")
 
-    md.blank()
     md.text(
-        f"**Total impact:** {total} functions across {len(callers_by_depth)} levels"
+        f"Total impact: {total} functions across {len(callers_by_depth)} levels"
     )
 
     return md.build()
@@ -1334,16 +1274,8 @@ async def impact(function_name: str, depth: int = 3) -> str:
 
 
 @mcp.tool()
-async def trace_module(module_name: str) -> str:
-    """
-    Trace a Python module (torch.nn.Linear, torch.optim.Adam, etc.)
-
-    Args:
-        module_name: Module or class name to trace (e.g., "Linear", "torch.nn.Linear")
-
-    Returns:
-        Module definition with methods, base classes, and file location.
-    """
+async def trace_module(module_name: str, focus: str = "methods") -> str:
+    """Trace a Python module class (e.g. 'Linear', 'torch.nn.Linear'). Focus: 'methods' (default), 'full' (includes docstring and bases)."""
     _ensure_loaded()
 
     if not _state.py_classes:
@@ -1352,13 +1284,15 @@ async def trace_module(module_name: str) -> str:
     # Extract class name from qualified name
     search_name = module_name.split(".")[-1]
 
-    # Find matching classes
-    matches = []
+    # Find matching classes — exact matches first, then substring
+    exact_matches = []
+    substring_matches = []
     for name, classes in _state.py_classes.items():
         if search_name.lower() == name.lower():
-            matches.extend(classes)
+            exact_matches.extend(classes)
         elif search_name.lower() in name.lower():
-            matches.extend(classes)
+            substring_matches.extend(classes)
+    matches = exact_matches if exact_matches else substring_matches
 
     if not matches:
         # Try fuzzy match
@@ -1367,35 +1301,35 @@ async def trace_module(module_name: str) -> str:
         )
         if similar:
             return (
-                f"Module `{module_name}` not found. Did you mean: {', '.join(similar)}?"
+                f"Module `{module_name}` not found. Similar: {', '.join(similar)}"
             )
         return f"Module `{module_name}` not found."
 
-    md = Markdown()
+    md = create_formatter()
     md.h2(f"Module: `{module_name}`")
 
-    for cls in matches[:3]:  # Limit to 3 matches
+    for cls in matches[:1]:
         md.h3(f"{cls.qualified_name}")
         path = _rel_path(cls.file_path)
         md.text(f"**File:** `{path}:{cls.line_number}`")
 
-        if cls.bases:
-            md.text(f"**Bases:** {', '.join(cls.bases)}")
+        if focus == "full":
+            if cls.bases:
+                md.text(f"**Bases:** {', '.join(cls.bases)}")
 
-        if cls.is_module:
-            md.text("**Type:** torch.nn.Module")
+            if cls.is_module:
+                md.text("**Type:** torch.nn.Module")
 
-        if cls.docstring:
-            # Truncate docstring
-            doc = (
-                cls.docstring[:300] + "..."
-                if len(cls.docstring) > 300
-                else cls.docstring
-            )
-            md.blank().text(f"*{doc}*")
+            if cls.docstring:
+                doc = (
+                    cls.docstring[:150] + "..."
+                    if len(cls.docstring) > 150
+                    else cls.docstring
+                )
+                md.text(f"*{doc}*")
 
         if cls.methods:
-            md.blank().text("**Methods:**")
+            md.text("**Methods:**")
             for method in cls.methods[:10]:
                 sig = method.signature or "()"
                 md.item(f"`{method.name}{sig}`")
@@ -1404,30 +1338,21 @@ async def trace_module(module_name: str) -> str:
 
         md.blank()
 
-    if len(matches) > 3:
-        md.text(f"*Showing 3 of {len(matches)} matches*")
+    if len(matches) > 1:
+        md.text(f"*Showing top match of {len(matches)} total.*")
 
     return md.build()
 
 
 @mcp.tool()
 async def list_modules(category: str = "nn") -> str:
-    """
-    List available PyTorch modules by category.
-
-    Args:
-        category: Category to list - "nn" (neural network layers), "optim" (optimizers),
-                  "all" (all classes), or a search query
-
-    Returns:
-        List of available modules in the category.
-    """
+    """List PyTorch modules by category: 'nn', 'optim', 'all', or a search query."""
     _ensure_loaded()
 
     if not _state.py_classes:
         return "Python module analysis not available."
 
-    md = Markdown()
+    md = create_formatter()
 
     if category == "nn":
         md.h2("Neural Network Modules (torch.nn)")
@@ -1452,10 +1377,10 @@ async def list_modules(category: str = "nn") -> str:
 
         if layers:
             md.h3(f"Layers ({len(layers)})")
-            for m in layers[:30]:
+            for m in layers[:20]:
                 md.item(f"`{m.name}` - {m.qualified_name}")
-            if len(layers) > 30:
-                md.item(f"*... and {len(layers) - 30} more*")
+            if len(layers) > 20:
+                md.item(f"*... and {len(layers) - 20} more.*")
 
         if losses:
             md.h3(f"Loss Functions ({len(losses)})")
@@ -1511,71 +1436,68 @@ async def list_modules(category: str = "nn") -> str:
 
 
 @mcp.tool()
-async def find_similar_tests(query: str, limit: int = 20) -> str:
-    """
-    Find tests related to an operator, function, or concept.
-
-    Searches test files, test classes, and test functions for matches.
-    Useful for finding example tests when implementing new tests.
-
-    Args:
-        query: Search term (e.g., "add", "softmax", "backward", "cuda")
-        limit: Maximum results to return (default 20)
-
-    Returns:
-        Matching tests with file locations and context.
-    """
+async def find_similar_tests(query: str, limit: int = 10, focus: str = "all") -> str:
+    """Find tests related to an operator or concept. Focus: 'all' (default), 'functions', 'files', 'classes'."""
     _ensure_loaded("test")
 
     query_lower = query.lower()
-    md = Markdown()
+    md = create_formatter()
     md.h2(f"Tests matching: `{query}`")
 
-    # Search test functions
+    def _word_match(query_lower: str, name_lower: str) -> bool:
+        """Match on word boundaries to avoid 'add' matching 'padding'."""
+        idx = name_lower.find(query_lower)
+        if idx == -1:
+            return False
+        before = name_lower[idx - 1] if idx > 0 else "_"
+        after = name_lower[idx + len(query_lower)] if idx + len(query_lower) < len(name_lower) else "_"
+        return not before.isalpha() and not after.isalpha()
+
     matching_funcs = []
-    for func_name, locations in _state.test_functions.items():
-        if query_lower in func_name.lower():
-            for loc in locations:
-                matching_funcs.append({
-                    "name": func_name,
-                    "class": loc.get("class"),
-                    "file": loc["file"],
-                    "line": loc["line"],
-                })
+    if focus in ("all", "functions"):
+        for func_name, locations in _state.test_functions.items():
+            if _word_match(query_lower, func_name.lower()):
+                for loc in locations:
+                    matching_funcs.append({
+                        "name": func_name,
+                        "class": loc.get("class"),
+                        "file": loc["file"],
+                        "line": loc["line"],
+                    })
 
-    # Search test classes
     matching_classes = []
-    for class_name, locations in _state.test_classes.items():
-        if query_lower in class_name.lower():
-            for loc in locations:
-                matching_classes.append({
-                    "name": class_name,
-                    "file": loc["file"],
-                    "line": loc["line"],
-                    "bases": loc.get("bases", []),
+    if focus in ("all", "classes"):
+        for class_name, locations in _state.test_classes.items():
+            if _word_match(query_lower, class_name.lower()):
+                for loc in locations:
+                    matching_classes.append({
+                        "name": class_name,
+                        "file": loc["file"],
+                        "line": loc["line"],
+                        "bases": loc.get("bases", []),
+                    })
+
+    matching_files = []
+    if focus in ("all", "files"):
+        for file_path, info in _state.test_files.items():
+            if query_lower in file_path.lower():
+                matching_files.append({
+                    "path": file_path,
+                    "classes": len(info.get("classes", [])),
+                    "functions": len(info.get("functions", [])),
                 })
 
-    # Search test files by path
-    matching_files = []
-    for file_path, info in _state.test_files.items():
-        if query_lower in file_path.lower():
-            matching_files.append({
-                "path": file_path,
-                "classes": len(info.get("classes", [])),
-                "functions": len(info.get("functions", [])),
-            })
-
-    # Check OpInfo registry
     matching_opinfo = []
-    for op_name, info in _state.opinfo_registry.items():
-        if query_lower in op_name.lower():
-            matching_opinfo.append(info)
+    if focus in ("all", "functions"):
+        for op_name, info in _state.opinfo_registry.items():
+            if _word_match(query_lower, op_name.lower()):
+                matching_opinfo.append(info)
 
     # Output results
     total = len(matching_funcs) + len(matching_classes) + len(matching_files) + len(matching_opinfo)
 
     if total == 0:
-        return f"No tests found matching `{query}`. Try a broader search term."
+        return f"No tests found matching `{query}`."
 
     md.text(f"Found {total} matches\n")
 
@@ -1599,37 +1521,29 @@ async def find_similar_tests(query: str, limit: int = 20) -> str:
 
     if matching_classes:
         md.h3(f"Test Classes ({len(matching_classes)})")
-        for cls in matching_classes[:10]:
+        for cls in matching_classes[:5]:
             bases = f" ({', '.join(cls['bases'][:2])})" if cls.get("bases") else ""
             md.item(f"`{cls['name']}`{bases} → `{cls['file']}:{cls['line']}`")
-        if len(matching_classes) > 10:
-            md.item(f"*... and {len(matching_classes) - 10} more*")
+        if len(matching_classes) > 5:
+            md.item(f"*... and {len(matching_classes) - 5} more*")
         md.blank()
 
     if matching_files:
         md.h3(f"Test Files ({len(matching_files)})")
-        for f in matching_files[:10]:
+        for f in matching_files[:5]:
             md.item(f"`{f['path']}` ({f['classes']} classes, {f['functions']} tests)")
-        if len(matching_files) > 10:
-            md.item(f"*... and {len(matching_files) - 10} more*")
+        if len(matching_files) > 5:
+            md.item(f"*... and {len(matching_files) - 5} more*")
 
     return md.build()
 
 
 @mcp.tool()
 async def list_test_utils(category: str = "all") -> str:
-    """
-    List available PyTorch test utilities and infrastructure.
-
-    Args:
-        category: Filter by category - "all", "fixtures", "assertions", "decorators"
-
-    Returns:
-        Available test utilities with descriptions and file locations.
-    """
+    """List PyTorch test utilities and infrastructure by category."""
     _ensure_loaded("test")
 
-    md = Markdown()
+    md = create_formatter()
     md.h2("PyTorch Test Utilities")
 
     # Key utility modules with descriptions
@@ -1709,15 +1623,7 @@ async def list_test_utils(category: str = "all") -> str:
 
 @mcp.tool()
 async def test_file_info(file_path: str) -> str:
-    """
-    Get detailed information about a specific test file.
-
-    Args:
-        file_path: Path to test file (e.g., "test/test_torch.py" or just "test_torch")
-
-    Returns:
-        Test classes, functions, and infrastructure used in the file.
-    """
+    """Get test classes and functions in a specific test file (e.g. 'test/test_torch.py')."""
     _ensure_loaded("test")
 
     # Find matching file
@@ -1730,7 +1636,7 @@ async def test_file_info(file_path: str) -> str:
     if not matches:
         return f"No test file found matching `{file_path}`."
 
-    md = Markdown()
+    md = create_formatter()
 
     for path, info in matches[:3]:
         md.h2(f"Test File: `{path}`")

@@ -1,10 +1,32 @@
-"""Markdown formatting utilities."""
+"""Formatting utilities for MCP tool responses.
 
-from typing import List, Optional
+Provides a protocol-based formatter hierarchy:
+  - Markdown: Full markdown output for human-facing contexts.
+  - CompactText: Minimal plain-text output optimized for LLM token efficiency.
+
+Use create_formatter() factory to get the active formatter.
+"""
+
+from typing import List, Optional, Protocol
+
+
+class ResponseFormatter(Protocol):
+    """Interface all formatters must implement."""
+
+    def h2(self, text: str) -> "ResponseFormatter": ...
+    def h3(self, text: str) -> "ResponseFormatter": ...
+    def bold(self, label: str, value: str) -> "ResponseFormatter": ...
+    def code(self, label: str, value: str) -> "ResponseFormatter": ...
+    def item(self, text: str, indent: int = 0) -> "ResponseFormatter": ...
+    def text(self, text: str) -> "ResponseFormatter": ...
+    def blank(self) -> "ResponseFormatter": ...
+    def table(self, headers: List[str], rows: List[List[str]]) -> "ResponseFormatter": ...
+    def codeblock(self, code: str, lang: str = "") -> "ResponseFormatter": ...
+    def build(self) -> str: ...
 
 
 class Markdown:
-    """Simple markdown builder."""
+    """Full markdown builder for human-facing output."""
 
     def __init__(self):
         self._lines: List[str] = []
@@ -53,6 +75,73 @@ class Markdown:
 
     def build(self) -> str:
         return "\n".join(self._lines)
+
+
+class CompactText:
+    """Minimal plain-text builder optimized for LLM token efficiency."""
+
+    def __init__(self):
+        self._lines: List[str] = []
+
+    def h2(self, text: str) -> "CompactText":
+        self._lines.append(f"[{text}]")
+        return self
+
+    def h3(self, text: str) -> "CompactText":
+        self._lines.append(text)
+        return self
+
+    def bold(self, label: str, value: str) -> "CompactText":
+        self._lines.append(f"{label}: {value}")
+        return self
+
+    def code(self, label: str, value: str) -> "CompactText":
+        self._lines.append(f"{label}: {value}")
+        return self
+
+    def item(self, text: str, indent: int = 0) -> "CompactText":
+        prefix = "  " * indent
+        self._lines.append(f"{prefix}- {text}")
+        return self
+
+    def text(self, text: str) -> "CompactText":
+        self._lines.append(text)
+        return self
+
+    def blank(self) -> "CompactText":
+        if self._lines and self._lines[-1] != "":
+            self._lines.append("")
+        return self
+
+    def table(self, headers: List[str], rows: List[List[str]]) -> "CompactText":
+        for row in rows:
+            self._lines.append("  ".join(row))
+        return self
+
+    def codeblock(self, code: str, lang: str = "") -> "CompactText":
+        self._lines.append(code)
+        return self
+
+    def build(self) -> str:
+        return "\n".join(self._lines)
+
+
+_formatter_mode: str = "compact"
+
+
+def set_formatter_mode(mode: str) -> None:
+    """Set the active formatter mode ('compact' or 'markdown')."""
+    global _formatter_mode
+    if mode not in ("compact", "markdown"):
+        raise ValueError(f"Unknown formatter mode: {mode!r}. Use 'compact' or 'markdown'.")
+    _formatter_mode = mode
+
+
+def create_formatter() -> ResponseFormatter:
+    """Factory: return a formatter instance based on the active mode."""
+    if _formatter_mode == "markdown":
+        return Markdown()
+    return CompactText()
 
 
 def relative_path(full_path: str, base: Optional[str] = None) -> str:
