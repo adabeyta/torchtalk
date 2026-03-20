@@ -6,7 +6,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Dict, List, Any, Tuple
+from typing import Literal, Optional, Dict, List, Any, Tuple
 
 from mcp.server.fastmcp import FastMCP
 
@@ -888,17 +888,11 @@ async def get_status() -> str:
     md.table(
         ["Tool", "Status", "Description"],
         [
-            ["`trace`", ready, "ATen op: Python → C++ → file:line"],
-            ["`search`", ready, "Find ATen bindings by name, optional backend"],
-            ["`trace_module`", py_ready, "Python module: torch.nn.Linear, etc."],
-            ["`list_modules`", py_ready, "List nn.Module classes, optimizers"],
-            ["`impact`", cpp_ready, "Transitive callers + Python entry points"],
-            ["`calls`", cpp_ready, "Functions this function invokes (outbound)"],
-            ["`called_by`", cpp_ready, "Functions that invoke this (inbound)"],
-            ["`cuda_kernels`", ready, "GPU kernel launches with locations"],
-            ["`find_similar_tests`", test_ready, "Find tests for an operator/concept"],
-            ["`list_test_utils`", test_ready, "List test utilities and patterns"],
-            ["`test_file_info`", test_ready, "Details about a specific test file"],
+            ["`trace`", ready, "Trace a PyTorch op: Python → C++ → file:line"],
+            ["`search`", ready, "Search bindings (mode=bindings) or CUDA kernels (mode=kernels)"],
+            ["`graph`", cpp_ready, "C++ call graph: callers, calls, or impact analysis"],
+            ["`modules`", py_ready, "Python modules: trace a class or list by category"],
+            ["`tests`", test_ready, "Find tests, list utils, or get test file details"],
         ],
     )
 
@@ -906,8 +900,8 @@ async def get_status() -> str:
 
 
 @mcp.tool()
-async def trace(function_name: str, focus: str = "full") -> str:
-    """Trace a PyTorch function from Python API to C++ implementation with file:line locations."""
+async def trace(function_name: str, focus: Literal["full", "yaml", "dispatch"] = "full") -> str:
+    """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
     _ensure_loaded()
 
     md = create_formatter()
@@ -1043,9 +1037,7 @@ async def trace(function_name: str, focus: str = "full") -> str:
     return md.build()
 
 
-@mcp.tool()
-async def cuda_kernels(function_name: str = "") -> str:
-    """Find CUDA kernel launches in PyTorch, optionally filtered by function name."""
+async def _do_cuda_kernels(function_name: str = "") -> str:
     _ensure_loaded()
 
     md = create_formatter()
@@ -1080,9 +1072,7 @@ async def cuda_kernels(function_name: str = "") -> str:
     return md.build()
 
 
-@mcp.tool()
-async def search(query: str, backend: str = "", limit: int = 10) -> str:
-    """Search PyTorch bindings by name with optional backend filter (CPU, CUDA, Meta, etc.)."""
+async def _do_search_bindings(query: str, backend: str = "", limit: int = 10) -> str:
     _ensure_loaded()
 
     query_lower = query.lower()
@@ -1139,8 +1129,14 @@ async def search(query: str, backend: str = "", limit: int = 10) -> str:
 
 
 @mcp.tool()
-async def calls(function_name: str) -> str:
-    """Find functions that a C++ function calls (outbound dependencies)."""
+async def search(query: str, mode: Literal["bindings", "kernels"] = "bindings", backend: str = "", limit: int = 10) -> str:
+    """Search PyTorch bindings or CUDA kernels by name. mode='bindings' for dispatch registrations, mode='kernels' for GPU kernel launches."""
+    if mode == "kernels":
+        return await _do_cuda_kernels(query)
+    return await _do_search_bindings(query, backend=backend, limit=limit)
+
+
+async def _do_calls(function_name: str) -> str:
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -1164,9 +1160,7 @@ async def calls(function_name: str) -> str:
     return md.build()
 
 
-@mcp.tool()
-async def called_by(function_name: str) -> str:
-    """Find functions that call a C++ function (inbound dependents)."""
+async def _do_called_by(function_name: str) -> str:
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -1190,9 +1184,7 @@ async def called_by(function_name: str) -> str:
     return md.build()
 
 
-@mcp.tool()
-async def impact(function_name: str, depth: int = 2, focus: str = "callers") -> str:
-    """Analyze the impact of modifying a C++ function by tracing transitive callers. Focus: 'callers' (default), 'full' (includes Python entry points)."""
+async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers") -> str:
     _ensure_loaded()
     if status := _cpp_status():
         return status
@@ -1270,12 +1262,20 @@ async def impact(function_name: str, depth: int = 2, focus: str = "callers") -> 
     return md.build()
 
 
+@mcp.tool()
+async def graph(function_name: str, mode: Literal["calls", "callers", "impact"] = "callers", depth: int = 2) -> str:
+    """Query the C++ call graph. mode='callers' for inbound, 'calls' for outbound, 'impact' for transitive callers."""
+    if mode == "calls":
+        return await _do_calls(function_name)
+    elif mode == "impact":
+        return await _do_impact(function_name, depth=depth)
+    return await _do_called_by(function_name)
+
+
 # --- Python Module Tools ---
 
 
-@mcp.tool()
-async def trace_module(module_name: str, focus: str = "methods") -> str:
-    """Trace a Python module class (e.g. 'Linear', 'torch.nn.Linear'). Focus: 'methods' (default), 'full' (includes docstring and bases)."""
+async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
     _ensure_loaded()
 
     if not _state.py_classes:
@@ -1344,9 +1344,7 @@ async def trace_module(module_name: str, focus: str = "methods") -> str:
     return md.build()
 
 
-@mcp.tool()
-async def list_modules(category: str = "nn") -> str:
-    """List PyTorch modules by category: 'nn', 'optim', 'all', or a search query."""
+async def _do_list_modules(category: str = "nn") -> str:
     _ensure_loaded()
 
     if not _state.py_classes:
@@ -1432,12 +1430,18 @@ async def list_modules(category: str = "nn") -> str:
     return md.build()
 
 
+@mcp.tool()
+async def modules(name: str, mode: Literal["trace", "list"] = "trace") -> str:
+    """Query Python modules. mode='trace' for class details (methods, bases, file), mode='list' for browsing by category ('nn', 'optim', 'all')."""
+    if mode == "list":
+        return await _do_list_modules(category=name)
+    return await _do_trace_module(module_name=name)
+
+
 # --- Test Infrastructure Tools ---
 
 
-@mcp.tool()
-async def find_similar_tests(query: str, limit: int = 10, focus: str = "all") -> str:
-    """Find tests related to an operator or concept. Focus: 'all' (default), 'functions', 'files', 'classes'."""
+async def _do_find_similar_tests(query: str, limit: int = 10, focus: str = "all") -> str:
     _ensure_loaded("test")
 
     query_lower = query.lower()
@@ -1538,9 +1542,7 @@ async def find_similar_tests(query: str, limit: int = 10, focus: str = "all") ->
     return md.build()
 
 
-@mcp.tool()
-async def list_test_utils(category: str = "all") -> str:
-    """List PyTorch test utilities and infrastructure by category."""
+async def _do_list_test_utils(category: str = "all") -> str:
     _ensure_loaded("test")
 
     md = create_formatter()
@@ -1621,9 +1623,7 @@ async def list_test_utils(category: str = "all") -> str:
     return md.build()
 
 
-@mcp.tool()
-async def test_file_info(file_path: str) -> str:
-    """Get test classes and functions in a specific test file (e.g. 'test/test_torch.py')."""
+async def _do_test_file_info(file_path: str) -> str:
     _ensure_loaded("test")
 
     # Find matching file
@@ -1661,6 +1661,16 @@ async def test_file_info(file_path: str) -> str:
         md.text(f"*Showing 3 of {len(matches)} matching files*")
 
     return md.build()
+
+
+@mcp.tool()
+async def tests(query: str, mode: Literal["find", "utils", "file_info"] = "find", limit: int = 10) -> str:
+    """Query PyTorch test infrastructure. mode='find' to search tests by name, 'utils' for test utilities, 'file_info' for details on a specific test file."""
+    if mode == "utils":
+        return await _do_list_test_utils()
+    elif mode == "file_info":
+        return await _do_test_file_info(query)
+    return await _do_find_similar_tests(query, limit=limit)
 
 
 # --- Server Entry Point ---

@@ -67,32 +67,26 @@ All data cached to `~/.cache/torchtalk/`:
 
 **IMPORTANT**: Use the `mcp__torchtalk__*` tools directly (e.g., `mcp__torchtalk__trace`). Do NOT try to import or run Python code from `torchtalk.server` manually.
 
-### ATen Operators
+### Operators
 | Tool | Description |
 |------|-------------|
-| `trace(func, focus?)` | Python → YAML → C++ → file:line. Focus: "full", "yaml", "dispatch" |
-| `search(query, backend?)` | Find bindings by name with optional backend filter |
-| `cuda_kernels(func?)` | GPU kernel launches with file:line |
+| `trace(func, focus?)` | Trace any PyTorch op: Python → YAML → C++ → file:line. Focus: "full", "yaml", "dispatch" |
+| `search(query, mode?, backend?)` | mode="bindings" (default): find dispatch registrations. mode="kernels": find CUDA kernel launches |
 
 ### Call Graph (requires PyTorch build)
 | Tool | Description |
 |------|-------------|
-| `impact(func, depth?)` | Transitive callers + Python entry points |
-| `calls(func)` | Outbound: functions `func` invokes |
-| `called_by(func)` | Inbound: functions that invoke `func` |
+| `graph(func, mode?, depth?)` | mode="callers" (default): inbound. mode="calls": outbound. mode="impact": transitive callers |
 
 ### Python Modules
 | Tool | Description |
 |------|-------------|
-| `trace_module(name)` | Trace torch.nn.Linear, torch.optim.Adam, etc. |
-| `list_modules(category)` | List nn.Module classes, optimizers ("nn", "optim", "all") |
+| `modules(name, mode?)` | mode="trace" (default): class details. mode="list": browse by category ("nn", "optim", "all") |
 
 ### Test Infrastructure
 | Tool | Description |
 |------|-------------|
-| `find_similar_tests(query)` | Find tests for an operator/concept |
-| `list_test_utils(category)` | List test utilities and patterns |
-| `test_file_info(path)` | Details about a specific test file |
+| `tests(query, mode?)` | mode="find" (default): search tests. mode="utils": list utilities. mode="file_info": details on a test file |
 
 ## Key Files
 
