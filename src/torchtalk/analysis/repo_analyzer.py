@@ -13,7 +13,7 @@ LlamaIndex node metadata. They are NOT persisted in the index itself.
 import ast
 import logging
 from pathlib import Path
-from typing import List, Optional
+
 import networkx as nx
 
 log = logging.getLogger(__name__)
@@ -68,7 +68,7 @@ class RepoAnalyzer:
         # (graph_enhanced_indexer.py stores this but never uses it)
         return {}
 
-    def _find_python_files(self) -> List[Path]:
+    def _find_python_files(self) -> list[Path]:
         """Find Python files, excluding common test/build directories."""
         all_files = list(self.repo_path.rglob("*.py"))
 
@@ -103,7 +103,7 @@ class RepoAnalyzer:
     def _analyze_file(self, file_path: Path):
         """Analyze a single Python file for imports and calls."""
         try:
-            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+            with open(file_path, encoding="utf-8", errors="ignore") as f:
                 content = f.read()
 
             tree = ast.parse(content)
@@ -125,7 +125,7 @@ class RepoAnalyzer:
         except Exception:
             pass
 
-    def _extract_imports(self, tree: ast.AST) -> List[str]:
+    def _extract_imports(self, tree: ast.AST) -> list[str]:
         """Extract import statements from AST."""
         imports = []
         for node in ast.walk(tree):
@@ -135,7 +135,7 @@ class RepoAnalyzer:
                 imports.append(node.module)
         return imports
 
-    def _resolve_import(self, import_name: str, from_module: str) -> Optional[str]:
+    def _resolve_import(self, import_name: str, from_module: str) -> str | None:
         """
         Try to resolve an import to a file path in the repo.
 
@@ -184,7 +184,7 @@ class RepoAnalyzer:
                     called_name = f"{module_name}.{called}"
                     self.call_graph.add_edge(func_name, called_name)
 
-    def _extract_function_calls(self, node: ast.AST) -> List[str]:
+    def _extract_function_calls(self, node: ast.AST) -> list[str]:
         """Extract function call names from an AST node."""
         calls = []
         for child in ast.walk(node):

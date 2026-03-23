@@ -137,5 +137,8 @@ def validate_pytorch_path(path: str | Path) -> tuple[bool, str]:
         return False, f"No 'torch/' directory found in {p} (not a PyTorch checkout?)"
     nf = p / "aten" / "src" / "ATen" / "native" / "native_functions.yaml"
     if not nf.exists():
-        return False, f"native_functions.yaml not found in {p} (required for operator indexing)"
+        return (
+            False,
+            f"native_functions.yaml not found in {p} (required for operator indexing)",
+        )
     return True, f"Valid PyTorch source: {p}"

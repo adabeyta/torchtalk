@@ -4,7 +4,6 @@ import ast
 import logging
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional
 
 from .helpers import truncate
 
@@ -21,13 +20,13 @@ class PyFunction:
     line_number: int
     is_method: bool = False
     is_async: bool = False
-    decorators: List[str] = field(default_factory=list)
-    docstring: Optional[str] = None
-    signature: Optional[str] = None
+    decorators: list[str] = field(default_factory=list)
+    docstring: str | None = None
+    signature: str | None = None
     # For methods, track the class
-    class_name: Optional[str] = None
+    class_name: str | None = None
     # C++ binding if detected (e.g., calls torch._C.*)
-    cpp_binding: Optional[str] = None
+    cpp_binding: str | None = None
 
 
 @dataclass
@@ -38,10 +37,10 @@ class PyClass:
     qualified_name: str  # module.ClassName
     file_path: str
     line_number: int
-    bases: List[str] = field(default_factory=list)
-    decorators: List[str] = field(default_factory=list)
-    docstring: Optional[str] = None
-    methods: List[PyFunction] = field(default_factory=list)
+    bases: list[str] = field(default_factory=list)
+    decorators: list[str] = field(default_factory=list)
+    docstring: str | None = None
+    methods: list[PyFunction] = field(default_factory=list)
     # For torch.nn.Module subclasses
     is_module: bool = False
 
@@ -52,7 +51,7 @@ class PyImport:
 
     module: str  # What's being imported from
     name: str  # What's being imported
-    alias: Optional[str] = None  # as X
+    alias: str | None = None  # as X
     file_path: str = ""
     line_number: int = 0
 
@@ -63,22 +62,22 @@ class PyModule:
 
     name: str  # e.g., torch.nn.modules.linear
     file_path: str
-    classes: List[PyClass] = field(default_factory=list)
-    functions: List[PyFunction] = field(default_factory=list)
-    imports: List[PyImport] = field(default_factory=list)
-    exports: List[str] = field(default_factory=list)  # __all__
+    classes: list[PyClass] = field(default_factory=list)
+    functions: list[PyFunction] = field(default_factory=list)
+    imports: list[PyImport] = field(default_factory=list)
+    exports: list[str] = field(default_factory=list)  # __all__
 
 
 class PythonAnalyzer:
     """Analyzes Python source code using AST."""
 
     def __init__(self):
-        self._module_cache: Dict[str, PyModule] = {}
+        self._module_cache: dict[str, PyModule] = {}
 
-    def analyze_file(self, file_path: str) -> Optional[PyModule]:
+    def analyze_file(self, file_path: str) -> PyModule | None:
         """Analyze a single Python file."""
         path = Path(file_path)
-        if not path.exists() or not path.suffix == ".py":
+        if not path.exists() or path.suffix != ".py":
             return None
 
         try:
@@ -102,10 +101,10 @@ class PythonAnalyzer:
 
     def analyze_directory(
         self, directory: str, pattern: str = "**/*.py", skip_tests: bool = True
-    ) -> Dict[str, PyModule]:
+    ) -> dict[str, PyModule]:
         """Analyze all Python files in a directory."""
         dir_path = Path(directory)
-        modules: Dict[str, PyModule] = {}
+        modules: dict[str, PyModule] = {}
 
         files = list(dir_path.glob(pattern))
         log.info(f"Analyzing {len(files)} Python files in {directory}...")
@@ -151,7 +150,7 @@ class _ASTVisitor(ast.NodeVisitor):
     def __init__(self, module: PyModule, content: str):
         self.module = module
         self.content = content
-        self._current_class: Optional[PyClass] = None
+        self._current_class: PyClass | None = None
 
     def visit_Import(self, node: ast.Import):
         """Handle: import x, import x as y"""
@@ -258,11 +257,11 @@ class _ASTVisitor(ast.NodeVisitor):
     def visit_Assign(self, node: ast.Assign):
         """Handle assignments, looking for __all__."""
         for target in node.targets:
-            if isinstance(target, ast.Name) and target.id == "__all__":
-                if isinstance(node.value, ast.List):
-                    for elt in node.value.elts:
-                        if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
-                            self.module.exports.append(elt.value)
+            is_all = isinstance(target, ast.Name) and target.id == "__all__"
+            if is_all and isinstance(node.value, ast.List):
+                for elt in node.value.elts:
+                    if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                        self.module.exports.append(elt.value)
         self.generic_visit(node)
 
     def _get_name(self, node: ast.expr) -> str:
@@ -306,7 +305,7 @@ class _ASTVisitor(ast.NodeVisitor):
 
         return truncate(sig, 100)
 
-    def _find_cpp_binding(self, node: ast.FunctionDef) -> Optional[str]:
+    def _find_cpp_binding(self, node: ast.FunctionDef) -> str | None:
         """Look for C++ binding calls in function body."""
         for child in ast.walk(node):
             if isinstance(child, ast.Call):
@@ -320,12 +319,12 @@ class _ASTVisitor(ast.NodeVisitor):
         return None
 
 
-def build_module_index(modules: Dict[str, PyModule]) -> Dict[str, List]:
+def build_module_index(modules: dict[str, PyModule]) -> dict[str, list]:
     """Build searchable indexes from analyzed modules."""
-    by_class: Dict[str, List[PyClass]] = {}
-    by_function: Dict[str, List[PyFunction]] = {}
-    by_export: Dict[str, str] = {}  # export name -> module name
-    nn_modules: List[PyClass] = []
+    by_class: dict[str, list[PyClass]] = {}
+    by_function: dict[str, list[PyFunction]] = {}
+    by_export: dict[str, str] = {}  # export name -> module name
+    nn_modules: list[PyClass] = []
 
     for module in modules.values():
         # Index classes

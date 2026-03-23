@@ -7,7 +7,7 @@ Provides a protocol-based formatter hierarchy:
 Use create_formatter() factory to get the active formatter.
 """
 
-from typing import List, Optional, Protocol
+from typing import Protocol
 
 
 class ResponseFormatter(Protocol):
@@ -20,7 +20,9 @@ class ResponseFormatter(Protocol):
     def item(self, text: str, indent: int = 0) -> "ResponseFormatter": ...
     def text(self, text: str) -> "ResponseFormatter": ...
     def blank(self) -> "ResponseFormatter": ...
-    def table(self, headers: List[str], rows: List[List[str]]) -> "ResponseFormatter": ...
+    def table(
+        self, headers: list[str], rows: list[list[str]]
+    ) -> "ResponseFormatter": ...
     def codeblock(self, code: str, lang: str = "") -> "ResponseFormatter": ...
     def build(self) -> str: ...
 
@@ -29,7 +31,7 @@ class Markdown:
     """Full markdown builder for human-facing output."""
 
     def __init__(self):
-        self._lines: List[str] = []
+        self._lines: list[str] = []
 
     def h2(self, text: str) -> "Markdown":
         self._lines.append(f"## {text}\n")
@@ -60,7 +62,7 @@ class Markdown:
         self._lines.append("")
         return self
 
-    def table(self, headers: List[str], rows: List[List[str]]) -> "Markdown":
+    def table(self, headers: list[str], rows: list[list[str]]) -> "Markdown":
         self._lines.append("| " + " | ".join(headers) + " |")
         self._lines.append("|" + "|".join("-" * (len(h) + 2) for h in headers) + "|")
         for row in rows:
@@ -81,7 +83,7 @@ class CompactText:
     """Minimal plain-text builder optimized for LLM token efficiency."""
 
     def __init__(self):
-        self._lines: List[str] = []
+        self._lines: list[str] = []
 
     def h2(self, text: str) -> "CompactText":
         self._lines.append(f"[{text}]")
@@ -113,7 +115,7 @@ class CompactText:
             self._lines.append("")
         return self
 
-    def table(self, headers: List[str], rows: List[List[str]]) -> "CompactText":
+    def table(self, headers: list[str], rows: list[list[str]]) -> "CompactText":
         for row in rows:
             self._lines.append("  ".join(row))
         return self
@@ -133,7 +135,9 @@ def set_formatter_mode(mode: str) -> None:
     """Set the active formatter mode ('compact' or 'markdown')."""
     global _formatter_mode
     if mode not in ("compact", "markdown"):
-        raise ValueError(f"Unknown formatter mode: {mode!r}. Use 'compact' or 'markdown'.")
+        raise ValueError(
+            f"Unknown formatter mode: {mode!r}. Use 'compact' or 'markdown'."
+        )
     _formatter_mode = mode
 
 
@@ -144,7 +148,7 @@ def create_formatter() -> ResponseFormatter:
     return CompactText()
 
 
-def relative_path(full_path: str, base: Optional[str] = None) -> str:
+def relative_path(full_path: str, base: str | None = None) -> str:
     """Convert absolute path to relative, stripping common prefixes."""
     if not full_path:
         return ""
@@ -158,5 +162,3 @@ def relative_path(full_path: str, base: Optional[str] = None) -> str:
         if path.startswith(prefix):
             return path[len(prefix) :]
     return path
-
-

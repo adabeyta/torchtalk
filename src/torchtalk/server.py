@@ -6,16 +6,15 @@ import logging
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal, Optional, Dict, List, Any, Tuple
+from typing import Any, Literal
 
 from mcp.server.fastmcp import FastMCP
 
-from .formatting import Markdown, relative_path, create_formatter
 from .analysis.helpers import (
-    levenshtein_distance,
-    fuzzy_match,
-    safe_sort_key,
     dedupe_by_key,
+    fuzzy_match,
+    levenshtein_distance,
+    safe_sort_key,
     truncate,
 )
 from .analysis.patterns import (
@@ -23,10 +22,15 @@ from .analysis.patterns import (
     PYTHON_SEARCH_DIRS,
     TEST_SEARCH_DIRS,
     TEST_UTILITY_MODULES,
-    should_exclude as _should_exclude,
+)
+from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
 )
+from .analysis.patterns import (
+    should_exclude as _should_exclude,
+)
 from .config import CACHE_DIR, cache_paths, resolve_pytorch_source, source_hash
+from .formatting import Markdown, create_formatter, relative_path
 
 log = logging.getLogger(__name__)
 mcp = FastMCP("torchtalk")
@@ -35,28 +39,29 @@ mcp = FastMCP("torchtalk")
 @dataclass
 class ServerState:
     """Server state container."""
-    bindings: List[Dict] = field(default_factory=list)
-    cuda_kernels: List[Dict] = field(default_factory=list)
-    native_functions: Dict[str, Dict] = field(default_factory=dict)
-    derivatives: Dict[str, Dict] = field(default_factory=dict)
-    native_implementations: Dict[str, List[Dict]] = field(default_factory=dict)
 
-    by_python_name: Dict[str, List[Dict]] = field(default_factory=dict)
-    by_cpp_name: Dict[str, List[Dict]] = field(default_factory=dict)
-    by_dispatch_key: Dict[str, List[Dict]] = field(default_factory=dict)
+    bindings: list[dict] = field(default_factory=list)
+    cuda_kernels: list[dict] = field(default_factory=list)
+    native_functions: dict[str, dict] = field(default_factory=dict)
+    derivatives: dict[str, dict] = field(default_factory=dict)
+    native_implementations: dict[str, list[dict]] = field(default_factory=dict)
 
-    py_modules: Dict[str, Any] = field(default_factory=dict)
-    py_classes: Dict[str, List[Any]] = field(default_factory=dict)
-    py_functions: Dict[str, List[Any]] = field(default_factory=dict)
-    nn_modules: List[Any] = field(default_factory=list)
+    by_python_name: dict[str, list[dict]] = field(default_factory=dict)
+    by_cpp_name: dict[str, list[dict]] = field(default_factory=dict)
+    by_dispatch_key: dict[str, list[dict]] = field(default_factory=dict)
 
-    test_files: Dict[str, Dict] = field(default_factory=dict)
-    test_classes: Dict[str, List[Dict]] = field(default_factory=dict)
-    test_functions: Dict[str, List[Dict]] = field(default_factory=dict)
-    test_utilities: Dict[str, Dict] = field(default_factory=dict)
-    opinfo_registry: Dict[str, Dict] = field(default_factory=dict)
+    py_modules: dict[str, Any] = field(default_factory=dict)
+    py_classes: dict[str, list[Any]] = field(default_factory=dict)
+    py_functions: dict[str, list[Any]] = field(default_factory=dict)
+    nn_modules: list[Any] = field(default_factory=list)
 
-    pytorch_source: Optional[str] = None
+    test_files: dict[str, dict] = field(default_factory=dict)
+    test_classes: dict[str, list[dict]] = field(default_factory=dict)
+    test_functions: dict[str, list[dict]] = field(default_factory=dict)
+    test_utilities: dict[str, dict] = field(default_factory=dict)
+    opinfo_registry: dict[str, dict] = field(default_factory=dict)
+
+    pytorch_source: str | None = None
     cpp_extractor: Any = None
     cpp_building: bool = False
     cpp_thread: Any = None
@@ -106,7 +111,7 @@ def _cache_valid(cache: Path, source: str) -> bool:
 # --- YAML Parsing ---
 
 
-def _parse_native_functions(source: str) -> Tuple[Dict, Dict]:
+def _parse_native_functions(source: str) -> tuple[dict, dict]:
     """Parse native_functions.yaml and derivatives.yaml."""
     import yaml
 
@@ -191,7 +196,7 @@ def _parse_native_functions(source: str) -> Tuple[Dict, Dict]:
 # --- Implementation Finding ---
 
 
-def _find_implementations(source: str, functions: Dict) -> Dict[str, List[Dict]]:
+def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]:
     """Find C++ implementations in source using configured search directories."""
     src = Path(source)
 
@@ -204,7 +209,10 @@ def _find_implementations(source: str, functions: Dict) -> Dict[str, List[Dict]]
         targets.add(f["base_name"])
         targets.update(f.get("dispatch", {}).values())
 
-    log.info(f"Searching for {len(targets)} implementations in {len(search_dirs)} directories...")
+    log.info(
+        f"Searching for {len(targets)} implementations "
+        f"in {len(search_dirs)} directories..."
+    )
 
     # Patterns for function definitions
     patterns = [
@@ -219,7 +227,7 @@ def _find_implementations(source: str, functions: Dict) -> Dict[str, List[Dict]]
         ),
     ]
 
-    impls: Dict[str, List[Dict]] = {}
+    impls: dict[str, list[dict]] = {}
     file_count = 0
 
     for search_dir in search_dirs:
@@ -260,12 +268,13 @@ def _find_implementations(source: str, functions: Dict) -> Dict[str, List[Dict]]
                     impls.setdefault(func_name, []).append(impl)
 
     log.info(
-        f"Found {sum(len(v) for v in impls.values())} implementations in {file_count} files"
+        f"Found {sum(len(v) for v in impls.values())} "
+        f"implementations in {file_count} files"
     )
     return impls
 
 
-def _fuzzy_find(name: str, data: Dict[str, Any]) -> Optional[List[Any]]:
+def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
     """Fuzzy match function name in a dict."""
     if name in data:
         return data[name] if isinstance(data[name], list) else [data[name]]
@@ -305,7 +314,7 @@ def _fuzzy_find(name: str, data: Dict[str, Any]) -> Optional[List[Any]]:
 # --- Index Building ---
 
 
-def _build_index(source: str) -> Dict[str, Any]:
+def _build_index(source: str) -> dict[str, Any]:
     """Build binding index from source."""
     from .analysis.binding_detector import BindingDetector
 
@@ -373,7 +382,8 @@ def _load_from_json(path: str):
     _build_indexes(_state)
 
     log.info(
-        f"Loaded {len(_state.bindings)} bindings, {len(_state.cuda_kernels)} CUDA kernels"
+        f"Loaded {len(_state.bindings)} bindings, "
+        f"{len(_state.cuda_kernels)} CUDA kernels"
     )
 
 
@@ -385,7 +395,7 @@ def _init_cpp_call_graph(source: str):
     global _state
 
     try:
-        from .analysis.cpp_call_graph import CppCallGraphExtractor, LIBCLANG_AVAILABLE
+        from .analysis.cpp_call_graph import LIBCLANG_AVAILABLE, CppCallGraphExtractor
 
         if not LIBCLANG_AVAILABLE:
             log.info("libclang not available - C++ call graph disabled")
@@ -398,7 +408,8 @@ def _init_cpp_call_graph(source: str):
         if extractor.load_cache(cache_key):
             _state.cpp_extractor = extractor
             log.info(
-                f"Loaded C++ call graph from cache ({len(extractor.function_locations)} functions)"
+                f"Loaded C++ call graph from cache "
+                f"({len(extractor.function_locations)} functions)"
             )
             return
 
@@ -442,7 +453,8 @@ def _cpp_status() -> str:
                 and not (src / "build/compile_commands.json").exists()
             ):
                 return (
-                    "C++ call graph unavailable - `compile_commands.json` not found.\n\n"
+                    "C++ call graph unavailable - "
+                    "`compile_commands.json` not found.\n\n"
                     "**To enable:** Build PyTorch once:\n"
                     f"```\ncd {_state.pytorch_source}\npython setup.py develop\n```"
                 )
@@ -484,7 +496,7 @@ def _init_python_modules(source: str):
         # Use configured Python search directories
         dirs_to_analyze = [src / d for d in PYTHON_SEARCH_DIRS]
 
-        all_modules: Dict[str, Any] = {}
+        all_modules: dict[str, Any] = {}
         analyzed_count = 0
         for dir_path in dirs_to_analyze:
             if dir_path.exists():
@@ -541,6 +553,7 @@ def _init_test_infrastructure(source: str):
 
     try:
         import ast
+
         src = Path(source)
 
         log.info("Analyzing test infrastructure...")
@@ -563,7 +576,9 @@ def _init_test_infrastructure(source: str):
 
                     # For test/ directory, be inclusive - index all .py files
                     # For torch/testing/, use pattern filtering
-                    is_main_test_dir = "/test/" in file_str and "/testing/" not in file_str
+                    is_main_test_dir = (
+                        "/test/" in file_str and "/testing/" not in file_str
+                    )
                     if not is_main_test_dir and not _has_test_patterns(content):
                         continue
 
@@ -585,9 +600,7 @@ def _init_test_infrastructure(source: str):
                     for node in ast.walk(tree):
                         # Extract test classes
                         if isinstance(node, ast.ClassDef):
-                            bases = [
-                                _get_ast_name(b) for b in node.bases
-                            ]
+                            bases = [_get_ast_name(b) for b in node.bases]
                             is_test_class = any(
                                 "TestCase" in b or "TestBase" in b for b in bases
                             )
@@ -601,11 +614,15 @@ def _init_test_infrastructure(source: str):
                             file_info["classes"].append(class_info)
 
                             # Index test classes
-                            _state.test_classes.setdefault(node.name, []).append(class_info)
+                            _state.test_classes.setdefault(node.name, []).append(
+                                class_info
+                            )
 
                             # Extract test methods
                             for item in node.body:
-                                if isinstance(item, ast.FunctionDef) and item.name.startswith("test_"):
+                                if isinstance(
+                                    item, ast.FunctionDef
+                                ) and item.name.startswith("test_"):
                                     func_info = {
                                         "name": item.name,
                                         "class": node.name,
@@ -613,10 +630,14 @@ def _init_test_infrastructure(source: str):
                                         "line": item.lineno,
                                     }
                                     file_info["functions"].append(func_info)
-                                    _state.test_functions.setdefault(item.name, []).append(func_info)
+                                    _state.test_functions.setdefault(
+                                        item.name, []
+                                    ).append(func_info)
 
                         # Extract standalone test functions
-                        elif isinstance(node, ast.FunctionDef) and node.name.startswith("test_"):
+                        elif isinstance(node, ast.FunctionDef) and node.name.startswith(
+                            "test_"
+                        ):
                             if node.col_offset == 0:  # Top-level function
                                 func_info = {
                                     "name": node.name,
@@ -625,7 +646,9 @@ def _init_test_infrastructure(source: str):
                                     "line": node.lineno,
                                 }
                                 file_info["functions"].append(func_info)
-                                _state.test_functions.setdefault(node.name, []).append(func_info)
+                                _state.test_functions.setdefault(node.name, []).append(
+                                    func_info
+                                )
 
                     _state.test_files[rel_path] = file_info
 
@@ -665,6 +688,7 @@ def _init_test_infrastructure(source: str):
 def _get_ast_name(node) -> str:
     """Get string name from AST node."""
     import ast
+
     try:
         if isinstance(node, ast.Name):
             return node.id
@@ -691,6 +715,7 @@ def _parse_opinfo_registry(opinfo_path: str):
 
         # Find OpInfo definitions - pattern: OpInfo('op_name', ...)
         import re
+
         pattern = r"OpInfo\s*\(\s*['\"]([^'\"]+)['\"]"
 
         # Get relative path for display
@@ -705,7 +730,7 @@ def _parse_opinfo_registry(opinfo_path: str):
         count = 0
         for match in re.finditer(pattern, content):
             op_name = match.group(1)
-            line = content[:match.start()].count("\n") + 1
+            line = content[: match.start()].count("\n") + 1
             _state.opinfo_registry[op_name] = {
                 "name": op_name,
                 "file": rel_path,
@@ -720,7 +745,7 @@ def _parse_opinfo_registry(opinfo_path: str):
         log.debug(f"Failed to parse OpInfo from {opinfo_path}: {e}")
 
 
-def _auto_detect_pytorch() -> Optional[str]:
+def _auto_detect_pytorch() -> str | None:
     """Auto-detect PyTorch source using 3-level resolution.
 
     Priority: PYTORCH_SOURCE env var > config.toml > None
@@ -732,7 +757,7 @@ def _auto_detect_pytorch() -> Optional[str]:
 # --- Helpers ---
 
 
-def _get_native_func(name: str) -> Optional[Dict]:
+def _get_native_func(name: str) -> dict | None:
     """Get native function info with fuzzy matching."""
     if name in _state.native_functions:
         return _state.native_functions[name]
@@ -753,7 +778,7 @@ def _get_native_func(name: str) -> Optional[Dict]:
     return None
 
 
-def _similar_functions(name: str, limit: int = 10) -> List[str]:
+def _similar_functions(name: str, limit: int = 10) -> list[str]:
     """Find similar function names using substring match and Levenshtein distance."""
     name_lower = name.lower()
     results = []  # (priority, length, name)
@@ -784,7 +809,7 @@ def _rel_path(path: str) -> str:
 
 
 def _format_call_item(
-    md: Markdown, item: Dict, name_key: str, file_key: str, line_key: str
+    md: Markdown, item: dict, name_key: str, file_key: str, line_key: str
 ):
     """Format a caller/callee item with optional file:line."""
     name = item[name_key]
@@ -889,9 +914,21 @@ async def get_status() -> str:
         ["Tool", "Status", "Description"],
         [
             ["`trace`", ready, "Trace a PyTorch op: Python → C++ → file:line"],
-            ["`search`", ready, "Search bindings (mode=bindings) or CUDA kernels (mode=kernels)"],
-            ["`graph`", cpp_ready, "C++ call graph: callers, calls, or impact analysis"],
-            ["`modules`", py_ready, "Python modules: trace a class or list by category"],
+            [
+                "`search`",
+                ready,
+                "Search bindings (mode=bindings) or CUDA kernels (mode=kernels)",
+            ],
+            [
+                "`graph`",
+                cpp_ready,
+                "C++ call graph: callers, calls, or impact analysis",
+            ],
+            [
+                "`modules`",
+                py_ready,
+                "Python modules: trace a class or list by category",
+            ],
             ["`tests`", test_ready, "Find tests, list utils, or get test file details"],
         ],
     )
@@ -900,7 +937,9 @@ async def get_status() -> str:
 
 
 @mcp.tool()
-async def trace(function_name: str, focus: Literal["full", "yaml", "dispatch"] = "full") -> str:
+async def trace(
+    function_name: str, focus: Literal["full", "yaml", "dispatch"] = "full"
+) -> str:
     """Trace a PyTorch op from Python to C++ implementation with file:line locations."""
     _ensure_loaded()
 
@@ -1129,8 +1168,17 @@ async def _do_search_bindings(query: str, backend: str = "", limit: int = 10) ->
 
 
 @mcp.tool()
-async def search(query: str, mode: Literal["bindings", "kernels"] = "bindings", backend: str = "", limit: int = 10) -> str:
-    """Search PyTorch bindings or CUDA kernels by name. mode='bindings' for dispatch registrations, mode='kernels' for GPU kernel launches."""
+async def search(
+    query: str,
+    mode: Literal["bindings", "kernels"] = "bindings",
+    backend: str = "",
+    limit: int = 10,
+) -> str:
+    """Search PyTorch bindings or CUDA kernels by name.
+
+    mode='bindings' for dispatch registrations,
+    mode='kernels' for GPU kernel launches.
+    """
     if mode == "kernels":
         return await _do_cuda_kernels(query)
     return await _do_search_bindings(query, backend=backend, limit=limit)
@@ -1194,7 +1242,7 @@ async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers")
     # BFS to find transitive callers
     visited = set()
     current_level = {function_name}
-    callers_by_depth: Dict[int, List[Dict]] = {}
+    callers_by_depth: dict[int, list[dict]] = {}
 
     for level in range(1, depth + 1):
         next_level = set()
@@ -1255,16 +1303,22 @@ async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers")
             if len(python_entries) > 10:
                 md.item(f"*... and {len(python_entries) - 10} more*")
 
-    md.text(
-        f"Total impact: {total} functions across {len(callers_by_depth)} levels"
-    )
+    md.text(f"Total impact: {total} functions across {len(callers_by_depth)} levels")
 
     return md.build()
 
 
 @mcp.tool()
-async def graph(function_name: str, mode: Literal["calls", "callers", "impact"] = "callers", depth: int = 2) -> str:
-    """Query the C++ call graph. mode='callers' for inbound, 'calls' for outbound, 'impact' for transitive callers."""
+async def graph(
+    function_name: str,
+    mode: Literal["calls", "callers", "impact"] = "callers",
+    depth: int = 2,
+) -> str:
+    """Query the C++ call graph.
+
+    mode='callers' for inbound, 'calls' for outbound,
+    'impact' for transitive callers.
+    """
     if mode == "calls":
         return await _do_calls(function_name)
     elif mode == "impact":
@@ -1300,9 +1354,7 @@ async def _do_trace_module(module_name: str, focus: str = "methods") -> str:
             search_name, list(_state.py_classes.keys()), max_results=5
         )
         if similar:
-            return (
-                f"Module `{module_name}` not found. Similar: {', '.join(similar)}"
-            )
+            return f"Module `{module_name}` not found. Similar: {', '.join(similar)}"
         return f"Module `{module_name}` not found."
 
     md = create_formatter()
@@ -1432,7 +1484,11 @@ async def _do_list_modules(category: str = "nn") -> str:
 
 @mcp.tool()
 async def modules(name: str, mode: Literal["trace", "list"] = "trace") -> str:
-    """Query Python modules. mode='trace' for class details (methods, bases, file), mode='list' for browsing by category ('nn', 'optim', 'all')."""
+    """Query Python modules.
+
+    mode='trace' for class details,
+    mode='list' for browsing by category ('nn', 'optim', 'all').
+    """
     if mode == "list":
         return await _do_list_modules(category=name)
     return await _do_trace_module(module_name=name)
@@ -1441,7 +1497,9 @@ async def modules(name: str, mode: Literal["trace", "list"] = "trace") -> str:
 # --- Test Infrastructure Tools ---
 
 
-async def _do_find_similar_tests(query: str, limit: int = 10, focus: str = "all") -> str:
+async def _do_find_similar_tests(
+    query: str, limit: int = 10, focus: str = "all"
+) -> str:
     _ensure_loaded("test")
 
     query_lower = query.lower()
@@ -1454,7 +1512,11 @@ async def _do_find_similar_tests(query: str, limit: int = 10, focus: str = "all"
         if idx == -1:
             return False
         before = name_lower[idx - 1] if idx > 0 else "_"
-        after = name_lower[idx + len(query_lower)] if idx + len(query_lower) < len(name_lower) else "_"
+        after = (
+            name_lower[idx + len(query_lower)]
+            if idx + len(query_lower) < len(name_lower)
+            else "_"
+        )
         return not before.isalpha() and not after.isalpha()
 
     matching_funcs = []
@@ -1462,34 +1524,40 @@ async def _do_find_similar_tests(query: str, limit: int = 10, focus: str = "all"
         for func_name, locations in _state.test_functions.items():
             if _word_match(query_lower, func_name.lower()):
                 for loc in locations:
-                    matching_funcs.append({
-                        "name": func_name,
-                        "class": loc.get("class"),
-                        "file": loc["file"],
-                        "line": loc["line"],
-                    })
+                    matching_funcs.append(
+                        {
+                            "name": func_name,
+                            "class": loc.get("class"),
+                            "file": loc["file"],
+                            "line": loc["line"],
+                        }
+                    )
 
     matching_classes = []
     if focus in ("all", "classes"):
         for class_name, locations in _state.test_classes.items():
             if _word_match(query_lower, class_name.lower()):
                 for loc in locations:
-                    matching_classes.append({
-                        "name": class_name,
-                        "file": loc["file"],
-                        "line": loc["line"],
-                        "bases": loc.get("bases", []),
-                    })
+                    matching_classes.append(
+                        {
+                            "name": class_name,
+                            "file": loc["file"],
+                            "line": loc["line"],
+                            "bases": loc.get("bases", []),
+                        }
+                    )
 
     matching_files = []
     if focus in ("all", "files"):
         for file_path, info in _state.test_files.items():
             if query_lower in file_path.lower():
-                matching_files.append({
-                    "path": file_path,
-                    "classes": len(info.get("classes", [])),
-                    "functions": len(info.get("functions", [])),
-                })
+                matching_files.append(
+                    {
+                        "path": file_path,
+                        "classes": len(info.get("classes", [])),
+                        "functions": len(info.get("functions", [])),
+                    }
+                )
 
     matching_opinfo = []
     if focus in ("all", "functions"):
@@ -1498,7 +1566,12 @@ async def _do_find_similar_tests(query: str, limit: int = 10, focus: str = "all"
                 matching_opinfo.append(info)
 
     # Output results
-    total = len(matching_funcs) + len(matching_classes) + len(matching_files) + len(matching_opinfo)
+    total = (
+        len(matching_funcs)
+        + len(matching_classes)
+        + len(matching_files)
+        + len(matching_opinfo)
+    )
 
     if total == 0:
         return f"No tests found matching `{query}`."
@@ -1552,13 +1625,23 @@ async def _do_list_test_utils(category: str = "all") -> str:
     utility_info = {
         "torch/testing/_internal/common_utils.py": {
             "name": "common_utils",
-            "description": "Core test utilities: TestCase base, device helpers, dtype utilities",
-            "key_items": ["TestCase", "run_tests", "instantiate_parametrized_tests", "IS_CUDA"],
+            "description": "Core test utilities: TestCase, device/dtype helpers",
+            "key_items": [
+                "TestCase",
+                "run_tests",
+                "instantiate_parametrized_tests",
+                "IS_CUDA",
+            ],
         },
         "torch/testing/_internal/common_device_type.py": {
             "name": "common_device_type",
             "description": "Device-agnostic testing infrastructure",
-            "key_items": ["instantiate_device_type_tests", "ops", "onlyCPU", "onlyCUDA"],
+            "key_items": [
+                "instantiate_device_type_tests",
+                "ops",
+                "onlyCPU",
+                "onlyCUDA",
+            ],
         },
         "torch/testing/_internal/common_dtype.py": {
             "name": "common_dtype",
@@ -1589,7 +1672,9 @@ async def _do_list_test_utils(category: str = "all") -> str:
 
     md.h3("Core Utilities")
     for path, info in utility_info.items():
-        exists = path in _state.test_utilities or Path(_state.pytorch_source or "") / path
+        exists = (
+            path in _state.test_utilities or Path(_state.pytorch_source or "") / path
+        )
         status = "✓" if exists else "?"
         md.item(f"**{info['name']}** {status}")
         md.item(f"*{info['description']}*", 1)
@@ -1610,11 +1695,19 @@ async def _do_list_test_utils(category: str = "all") -> str:
     # Common test patterns
     md.h3("Common Test Patterns")
     patterns = [
-        ("Device-type tests", "`@instantiate_device_type_tests`", "Run tests across CPU/CUDA"),
+        (
+            "Device-type tests",
+            "`@instantiate_device_type_tests`",
+            "Run tests across CPU/CUDA",
+        ),
         ("Parametrized tests", "`@parametrize`", "Run tests with multiple inputs"),
         ("OpInfo tests", "`@ops(op_db)`", "Test operators using OpInfo metadata"),
         ("Gradient check", "`gradcheck(fn, inputs)`", "Verify autograd correctness"),
-        ("Assert close", "`torch.testing.assert_close(a, b)`", "Compare tensors with tolerance"),
+        (
+            "Assert close",
+            "`torch.testing.assert_close(a, b)`",
+            "Compare tensors with tolerance",
+        ),
     ]
     for name, code, desc in patterns:
         md.item(f"**{name}**: {code}")
@@ -1644,7 +1737,11 @@ async def _do_test_file_info(file_path: str) -> str:
         if info.get("classes"):
             md.h3(f"Test Classes ({len(info['classes'])})")
             for cls in info["classes"][:10]:
-                bases = f" extends {', '.join(cls['bases'][:2])}" if cls.get("bases") else ""
+                bases = (
+                    f" extends {', '.join(cls['bases'][:2])}"
+                    if cls.get("bases")
+                    else ""
+                )
                 md.item(f"`{cls['name']}`{bases} (line {cls['line']})")
 
         if info.get("functions"):
@@ -1664,8 +1761,14 @@ async def _do_test_file_info(file_path: str) -> str:
 
 
 @mcp.tool()
-async def tests(query: str, mode: Literal["find", "utils", "file_info"] = "find", limit: int = 10) -> str:
-    """Query PyTorch test infrastructure. mode='find' to search tests by name, 'utils' for test utilities, 'file_info' for details on a specific test file."""
+async def tests(
+    query: str, mode: Literal["find", "utils", "file_info"] = "find", limit: int = 10
+) -> str:
+    """Query PyTorch test infrastructure.
+
+    mode='find' to search tests, 'utils' for utilities,
+    'file_info' for details on a test file.
+    """
     if mode == "utils":
         return await _do_list_test_utils()
     elif mode == "file_info":
@@ -1677,8 +1780,8 @@ async def tests(query: str, mode: Literal["find", "utils", "file_info"] = "find"
 
 
 def run_server(
-    pytorch_source: Optional[str] = None,
-    index_path: Optional[str] = None,
+    pytorch_source: str | None = None,
+    index_path: str | None = None,
     transport: str = "stdio",
 ):
     """Start MCP server."""
@@ -1689,7 +1792,8 @@ def run_server(
         _load_from_json(index_path)
     else:
         log.warning(
-            "No PyTorch source specified. Tools will return errors until data is loaded."
+            "No PyTorch source specified. "
+            "Tools will return errors until data is loaded."
         )
 
     log.info("Starting TorchTalk MCP server...")
