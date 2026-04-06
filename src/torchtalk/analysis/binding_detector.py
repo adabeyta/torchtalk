@@ -39,8 +39,6 @@ class Binding:
     dispatch_key: str | None = None
     namespace: str | None = None
     cuda_kernel: str | None = None
-    implementation_file: str | None = None
-    docstring: str | None = None
     signature: str | None = None
 
     def to_dict(self) -> dict:
@@ -53,7 +51,6 @@ class Binding:
             "dispatch_key": self.dispatch_key,
             "namespace": self.namespace,
             "cuda_kernel": self.cuda_kernel,
-            "implementation_file": self.implementation_file,
             "signature": self.signature,
         }
 
@@ -108,7 +105,6 @@ class BindingDetector:
             log.warning(f"Parse error for {file_path}: {e}")
             return graph
 
-        # Detect different binding patterns
         self._detect_pybind11_bindings(root_node, content, file_path, graph)
         self._detect_torch_library_bindings(content, file_path, graph)
 
@@ -122,7 +118,6 @@ class BindingDetector:
     def _detect_pybind11_bindings(
         self, node, content: str, file_path: str, graph: BindingGraph
     ):
-        # Find PYBIND11_MODULE declarations
         modules = self._find_pybind11_modules(node, content)
 
         for module_name, module_node in modules:
@@ -130,8 +125,6 @@ class BindingDetector:
                 module_node, content, file_path, module_name, graph
             )
 
-        # Also scan entire file for py::class_ patterns (PyTorch style)
-        # These may not be inside PYBIND11_MODULE but are still pybind11 bindings
         self._extract_standalone_pybind_patterns(content, file_path, graph)
 
     def _find_pybind11_modules(self, node, content: str) -> list[tuple[str, Any]]:
@@ -169,12 +162,10 @@ class BindingDetector:
         body_text = self._get_node_text(body, content)
         body_start_line = body.start_point[0] + 1
 
-        # Extract function bindings
         self._extract_function_bindings(
             body_text, body_start_line, file_path, module_name, graph
         )
 
-        # Extract class bindings
         self._extract_class_bindings(
             body_text, body_start_line, file_path, module_name, graph
         )
@@ -508,10 +499,8 @@ class BindingDetector:
         return i
 
     def _find_enclosing_function(self, content: str, position: int) -> str | None:
-        # Look backwards for function definition
         search_region = content[:position]
 
-        # Pattern for C++ function definition
         func_pattern = (
             r"(?:static\s+)?(?:inline\s+)?(?:\w+::)*(\w+)\s*\([^)]*\)\s*(?:const\s*)?\{"
         )
@@ -526,17 +515,10 @@ class BindingDetector:
         return content[node.start_byte : node.end_byte]
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
-        """Scan a directory for cross-language bindings.
-
-        Uses shared configuration from config.py for exclusion and binding patterns.
-
-        Args:
-            directory: Directory to scan
-        """
+        """Scan a directory for cross-language bindings."""
         dir_path = Path(directory)
         combined_graph = BindingGraph()
 
-        # Find all C++/CUDA files
         extensions = ["*.cpp", "*.cc", "*.cxx", "*.cu", "*.cuh"]
         files = []
         for ext in extensions:

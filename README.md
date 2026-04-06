@@ -48,16 +48,21 @@ torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 ```
 torchtalk/
 ├── src/torchtalk/
-│   ├── server.py              # MCP server implementation
-│   ├── cli.py                 # CLI entry point
+│   ├── server.py              # MCP server (6 consolidated tools)
+│   ├── indexer.py             # Data loading, caching, initialization
+│   ├── cli.py                 # CLI (torchtalk mcp-serve)
 │   ├── formatting.py          # Response formatting (CompactText/Markdown)
+│   ├── tools/
+│   │   ├── ops.py             # trace, search, cuda_kernels
+│   │   ├── graph.py           # calls, called_by, impact
+│   │   ├── modules.py         # trace_module, list_modules
+│   │   └── tests.py           # find_similar_tests, list_test_utils, test_file_info
 │   └── analysis/
-│       ├── config.py          # Shared configuration (search dirs, patterns)
-│       ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection
-│       ├── cpp_call_graph.py      # libclang-based call graph
-│       ├── python_analyzer.py     # Python AST analysis (torch.nn, etc.)
-│       ├── repo_analyzer.py       # Import/call graph analysis
-│       └── helpers.py             # Shared utilities
+│       ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection (tree-sitter)
+│       ├── cpp_call_graph.py      # C++ call graph extraction (libclang)
+│       ├── python_analyzer.py     # Python module/class analysis (AST)
+│       ├── patterns.py            # Search directories, exclusion patterns
+│       └── helpers.py             # Utility functions
 ├── .claude/
 │   ├── commands/trace.md      # /trace slash command
 │   └── skills/.../SKILL.md    # Skill definition

@@ -30,7 +30,6 @@ classifiers = [
     "Topic :: Software Development :: Code Generators",
 ]
 dependencies = [
-    "networkx>=3.0",
     "tree-sitter>=0.21.0",
     "tree-sitter-language-pack>=0.6.0",
     "pathspec>=0.12",
