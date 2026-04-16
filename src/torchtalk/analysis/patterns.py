@@ -1,8 +1,5 @@
 """Shared configuration for TorchTalk analyzers."""
 
-from typing import List
-
-
 CPP_SEARCH_DIRS = [
     "aten/src/ATen/native",
     "torch/csrc",
@@ -38,21 +35,41 @@ TEST_SEARCH_DIRS = [
 ]
 
 EXCLUDE_PATTERNS = [
-    "/test/", "/tests/", "test_", "_test.",
-    "/third_party/", "/generated/", "/build/",
-    "__pycache__", "/benchmarks/", "/examples/",
+    "/test/",
+    "/tests/",
+    "test_",
+    "_test.",
+    "/third_party/",
+    "/generated/",
+    "/build/",
+    "__pycache__",
+    "/benchmarks/",
+    "/examples/",
 ]
 
 # Patterns to detect C++ binding code
 CPP_BINDING_PATTERNS = [
-    "TORCH_LIBRARY", "PYBIND11_MODULE", "pybind11", "py::class_<",
-    "m.def(", "__global__", "AT_DISPATCH", "c10::Dispatcher", "RegisterOperators",
+    "TORCH_LIBRARY",
+    "PYBIND11_MODULE",
+    "pybind11",
+    "py::class_<",
+    "m.def(",
+    "__global__",
+    "AT_DISPATCH",
+    "c10::Dispatcher",
+    "RegisterOperators",
 ]
 
 # Patterns to detect test files
 TEST_CONTENT_PATTERNS = [
-    "TestCase", "pytest", "instantiate_device_type_tests", "OpInfo",
-    "make_tensor", "assert_close", "dtype_test", "gradcheck",
+    "TestCase",
+    "pytest",
+    "instantiate_device_type_tests",
+    "OpInfo",
+    "make_tensor",
+    "assert_close",
+    "dtype_test",
+    "gradcheck",
 ]
 
 TEST_UTILITY_MODULES = [
@@ -71,7 +88,7 @@ def should_exclude(path: str) -> bool:
     return any(p in path.lower() for p in EXCLUDE_PATTERNS)
 
 
-def should_include_dir(file_path: str, include_dirs: List[str]) -> bool:
+def should_include_dir(file_path: str, include_dirs: list[str]) -> bool:
     return any(d in file_path for d in include_dirs)
 
 

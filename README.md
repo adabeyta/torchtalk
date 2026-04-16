@@ -37,33 +37,32 @@ torchtalk cursor-add -C /path/to/your/project -p /path/to/pytorch
 
 | Tool | Description |
 |------|-------------|
-| `trace(func, focus?)` | Python → YAML → C++ → file:line. Focus: "full", "yaml", "dispatch" |
-| `search(query, backend?)` | Find bindings by name with optional backend filter (CPU/CUDA/Meta) |
-| `cuda_kernels(func?)` | GPU kernel `<<<>>>` launches with file:line |
-| `impact(func, depth?)` | Transitive callers + Python entry points (security/refactoring) |
-| `calls(func)` | Outbound: functions `func` invokes internally |
-| `called_by(func)` | Inbound: functions that invoke `func` |
-| `trace_module(name)` | Trace Python module: torch.nn.Linear, torch.optim.Adam, etc. |
-| `list_modules(category)` | List nn.Module classes, optimizers, or search by name |
-| `find_similar_tests(query)` | Find tests for an operator/function/concept |
-| `list_test_utils(category?)` | List test utilities: fixtures, assertions, decorators |
-| `test_file_info(path)` | Details about a specific test file |
+| `trace(func, focus?)` | Trace any PyTorch op: Python → YAML → C++ → file:line |
+| `search(query, mode?, backend?)` | mode="bindings": dispatch registrations. mode="kernels": CUDA kernel launches |
+| `graph(func, mode?, depth?)` | mode="callers": inbound. mode="calls": outbound. mode="impact": transitive callers |
+| `modules(name, mode?)` | mode="trace": class details. mode="list": browse by category ("nn", "optim", "all") |
+| `tests(query, mode?)` | mode="find": search tests. mode="utils": list utilities. mode="file_info": test file details |
 
 ## Project Structure
 
 ```
 torchtalk/
 ├── src/torchtalk/
-│   ├── server.py              # MCP server implementation
-│   ├── cli.py                 # CLI entry point
-│   ├── formatting.py          # Markdown output utilities
+│   ├── server.py              # MCP server (6 consolidated tools)
+│   ├── indexer.py             # Data loading, caching, initialization
+│   ├── cli.py                 # CLI (torchtalk mcp-serve)
+│   ├── formatting.py          # Response formatting (CompactText/Markdown)
+│   ├── tools/
+│   │   ├── ops.py             # trace, search, cuda_kernels
+│   │   ├── graph.py           # calls, called_by, impact
+│   │   ├── modules.py         # trace_module, list_modules
+│   │   └── tests.py           # find_similar_tests, list_test_utils, test_file_info
 │   └── analysis/
-│       ├── config.py          # Shared configuration (search dirs, patterns)
-│       ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection
-│       ├── cpp_call_graph.py      # libclang-based call graph
-│       ├── python_analyzer.py     # Python AST analysis (torch.nn, etc.)
-│       ├── repo_analyzer.py       # Import/call graph analysis
-│       └── helpers.py             # Shared utilities
+│       ├── binding_detector.py    # pybind11/TORCH_LIBRARY detection (tree-sitter)
+│       ├── cpp_call_graph.py      # C++ call graph extraction (libclang)
+│       ├── python_analyzer.py     # Python module/class analysis (AST)
+│       ├── patterns.py            # Search directories, exclusion patterns
+│       └── helpers.py             # Utility functions
 ├── .claude/
 │   ├── commands/trace.md      # /trace slash command
 │   └── skills/.../SKILL.md    # Skill definition

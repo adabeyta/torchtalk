@@ -10,10 +10,10 @@ The MCP server automatically builds and caches the binding index on first run.
 """
 
 import argparse
-import logging
-import sys
-import shutil
 import json
+import logging
+import shutil
+import sys
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -41,7 +41,8 @@ def cmd_init(args):
         "  claude mcp add torchtalk -s user -- torchtalk mcp-serve\n\n"
         "Verify with:\n"
         "  torchtalk status",
-        path, source_path,
+        path,
+        source_path,
     )
 
 
@@ -66,7 +67,9 @@ def cmd_status(args):
     if not CONFIG_FILE.exists():
         lines.append(f"  Config file:     {CONFIG_FILE} (not found)")
         lines.append("")
-        lines.append("Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure.")
+        lines.append(
+            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure."
+        )
         print("\n".join(lines))
         sys.exit(1)
 
@@ -79,16 +82,22 @@ def cmd_status(args):
     if not config_source:
         lines.append("  PyTorch source:  not configured")
         lines.append("")
-        lines.append("Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure.")
+        lines.append(
+            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to configure."
+        )
         print("\n".join(lines))
         sys.exit(1)
 
     valid, msg = validate_pytorch_path(config_source)
-    lines.append(f"  PyTorch source:  {config_source} ({'valid' if valid else 'INVALID'})")
+    lines.append(
+        f"  PyTorch source:  {config_source} ({'valid' if valid else 'INVALID'})"
+    )
     if not valid:
         lines.append(f"                   {msg}")
         lines.append("")
-        lines.append("Run 'torchtalk init --pytorch-source /path/to/pytorch' to reconfigure.")
+        lines.append(
+            "Run 'torchtalk init --pytorch-source /path/to/pytorch' to reconfigure."
+        )
         print("\n".join(lines))
         sys.exit(1)
 
@@ -106,7 +115,10 @@ def cmd_status(args):
             if p.exists():
                 size_mb = p.stat().st_size / (1024 * 1024)
                 mtime = datetime.fromtimestamp(p.stat().st_mtime)
-                lines.append(f"  {label + ':':18s} {p.name} ({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})")
+                lines.append(
+                    f"  {label + ':':18s} {p.name} "
+                    f"({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})"
+                )
             else:
                 lines.append(f"  {label + ':':18s} not built")
     else:
@@ -118,10 +130,14 @@ def cmd_status(args):
         lines.append("")
         lines.append("Build artifacts:")
         if compile_cmds.exists():
-            lines.append(f"  compile_commands.json: found")
+            lines.append("  compile_commands.json: found")
         else:
-            lines.append(f"  compile_commands.json: not found (call graph features unavailable)")
-            lines.append(f"    Build PyTorch to enable: cd {source} && python setup.py develop")
+            lines.append(
+                "  compile_commands.json: not found (call graph features unavailable)"
+            )
+            lines.append(
+                f"    Build PyTorch to enable: cd {source} && python setup.py develop"
+            )
 
     lines.append("")
     lines.append("Status: Ready")
@@ -246,7 +262,9 @@ Example:
         required=True,
         help="Path to PyTorch source code",
     )
-    parser_init.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser_init.add_argument(
+        "--debug", action="store_true", help="Enable debug logging"
+    )
     parser_init.set_defaults(func=cmd_init)
 
     # status command
@@ -303,7 +321,7 @@ First run builds the index (a few minutes); subsequent runs use cache.
         "--global",
         dest="global_config",
         action="store_true",
-        help="Write to ~/.cursor/mcp.json (user-wide) instead of project .cursor/mcp.json",
+        help="Write to ~/.cursor/mcp.json (user-wide)",
     )
     parser_cursor.set_defaults(func=cmd_cursor_add)
 
@@ -312,7 +330,9 @@ First run builds the index (a few minutes); subsequent runs use cache.
     log_level = logging.DEBUG if getattr(args, "debug", False) else logging.INFO
     logging.basicConfig(
         level=log_level,
-        format="%(message)s" if log_level == logging.INFO else "%(asctime)s - %(levelname)s - %(message)s",
+        format="%(message)s"
+        if log_level == logging.INFO
+        else "%(asctime)s - %(levelname)s - %(message)s",
         stream=sys.stderr,
     )
 

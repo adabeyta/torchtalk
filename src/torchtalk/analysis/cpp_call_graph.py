@@ -4,35 +4,46 @@
 import json
 import logging
 import os
-from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple, Any
 from collections import defaultdict
 from multiprocessing import Pool, cpu_count
+from pathlib import Path
+from typing import Any
 
-from .patterns import CPP_SEARCH_DIRS, should_exclude, should_include_dir
 from .helpers import levenshtein_distance
+from .patterns import CPP_SEARCH_DIRS, should_exclude, should_include_dir
 
 log = logging.getLogger(__name__)
 
 
 try:
     import clang.cindex  # noqa: F401
+
     LIBCLANG_AVAILABLE = True
 except ImportError:
     LIBCLANG_AVAILABLE = False
     log.warning("libclang not available - C++ call graph extraction disabled")
 
 
-def _parse_single_file(args: Tuple[str, List[str]]) -> Dict[str, Any]:
+def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
     """Parse a single file and extract call graph data (runs in subprocess)."""
     file_path, compile_args = args
-    result = {"file": file_path, "callees": {}, "callers": {}, "function_locations": {}, "success": False, "error": None}
+    result = {
+        "file": file_path,
+        "callees": {},
+        "callers": {},
+        "function_locations": {},
+        "success": False,
+        "error": None,
+    }
 
     try:
-        from clang.cindex import Index, CursorKind, TranslationUnit
+        from clang.cindex import CursorKind, Index, TranslationUnit
+
         index = Index.create()
         filtered_args = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
-        tu = index.parse(file_path, args=filtered_args, options=TranslationUnit.PARSE_INCOMPLETE)
+        tu = index.parse(
+            file_path, args=filtered_args, options=TranslationUnit.PARSE_INCOMPLETE
+        )
 
         if tu is None:
             result["error"] = "parse failed"
@@ -50,11 +61,17 @@ def _parse_single_file(args: Tuple[str, List[str]]) -> Dict[str, Any]:
             return "::".join(reversed(parts)) if parts else ""
 
         def extract_calls(cursor, current_function=None):
-            if cursor.kind in (CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD) and cursor.is_definition():
+            if (
+                cursor.kind in (CursorKind.FUNCTION_DECL, CursorKind.CXX_METHOD)
+                and cursor.is_definition()
+            ):
                 func_name = get_qualified_name(cursor)
                 if func_name and cursor.location.file:
                     current_function = func_name
-                    function_locations[func_name] = (str(cursor.location.file), cursor.location.line)
+                    function_locations[func_name] = (
+                        str(cursor.location.file),
+                        cursor.location.line,
+                    )
 
             if cursor.kind == CursorKind.CALL_EXPR and current_function:
                 called = cursor.referenced
@@ -81,7 +98,7 @@ def _parse_single_file(args: Tuple[str, List[str]]) -> Dict[str, Any]:
 class CppCallGraphExtractor:
     """Extracts C++ call graph using libclang with multiprocessing."""
 
-    def __init__(self, cache_dir: Optional[Path] = None):
+    def __init__(self, cache_dir: Path | None = None):
         if not LIBCLANG_AVAILABLE:
             raise RuntimeError(
                 "libclang is not available. Install with: pip install libclang"
@@ -92,23 +109,23 @@ class CppCallGraphExtractor:
         )
         self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-        self.callees: Dict[str, Set[str]] = defaultdict(set)
-        self.callers: Dict[str, Set[str]] = defaultdict(set)
-        self.function_locations: Dict[str, Tuple[str, int]] = {}
-        self.processed_files: Set[str] = set()
+        self.callees: dict[str, set[str]] = defaultdict(set)
+        self.callers: dict[str, set[str]] = defaultdict(set)
+        self.function_locations: dict[str, tuple[str, int]] = {}
+        self.processed_files: set[str] = set()
 
     def extract_from_pytorch_parallel(
         self,
         pytorch_source: str,
-        num_workers: Optional[int] = None,
-        include_dirs: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        num_workers: int | None = None,
+        include_dirs: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Extract call graph from PyTorch using parallel processing.
 
         Args:
             pytorch_source: Path to PyTorch source directory
             num_workers: Number of parallel workers (default: 80% of CPU count)
-            include_dirs: List of directory patterns to include (default: CPP_SEARCH_DIRS)
+            include_dirs: Directory patterns to include
         """
         source = Path(pytorch_source)
 
@@ -152,17 +169,17 @@ class CppCallGraphExtractor:
             command = entry.get("command", "")
             directory = entry.get("directory", "")
 
-            if command:
-                args = command.split()[1:]
-            else:
-                args = entry.get("arguments", [])[1:]
+            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
 
             if not os.path.isabs(file_path) and directory:
                 file_path = os.path.join(directory, file_path)
 
             entries.append((file_path, args))
 
-        log.info(f"Filtered to {len(entries)} files (excluded {skipped_excluded} test/third_party files)")
+        log.info(
+            f"Filtered to {len(entries)} files "
+            f"(excluded {skipped_excluded} test/third_party)"
+        )
 
         log.info(f"Processing {len(entries)} C++ files with parallel libclang...")
 
@@ -202,7 +219,7 @@ class CppCallGraphExtractor:
 
         return self.get_call_graph_data()
 
-    def get_call_graph_data(self) -> Dict[str, Any]:
+    def get_call_graph_data(self) -> dict[str, Any]:
         return {
             "callees": {k: list(v) for k, v in self.callees.items()},
             "callers": {k: list(v) for k, v in self.callers.items()},
@@ -216,7 +233,7 @@ class CppCallGraphExtractor:
 
     def _get_relations(
         self, function_name: str, direction: str, fuzzy: bool = True
-    ) -> List[Dict[str, Any]]:
+    ) -> list[dict[str, Any]]:
         """Get call relations (callees or callers) for a function.
 
         Args:
@@ -230,30 +247,46 @@ class CppCallGraphExtractor:
 
         # Field names depend on direction
         if direction == "callees":
-            source_key, target_key, file_key, line_key = "caller", "callee", "callee_file", "callee_line"
+            source_key, target_key, file_key, line_key = (
+                "caller",
+                "callee",
+                "callee_file",
+                "callee_line",
+            )
         else:
-            source_key, target_key, file_key, line_key = "callee", "caller", "caller_file", "caller_line"
+            source_key, target_key, file_key, line_key = (
+                "callee",
+                "caller",
+                "caller_file",
+                "caller_line",
+            )
 
         for func in matches:
             for target in source_dict.get(func, set()):
                 loc = self.function_locations.get(target, (None, None))
-                results.append({
-                    source_key: func,
-                    target_key: target,
-                    file_key: loc[0],
-                    line_key: loc[1],
-                })
+                results.append(
+                    {
+                        source_key: func,
+                        target_key: target,
+                        file_key: loc[0],
+                        line_key: loc[1],
+                    }
+                )
         return results
 
-    def get_callees(self, function_name: str, fuzzy: bool = True) -> List[Dict[str, Any]]:
+    def get_callees(
+        self, function_name: str, fuzzy: bool = True
+    ) -> list[dict[str, Any]]:
         """Get functions that this function calls (outbound)."""
         return self._get_relations(function_name, "callees", fuzzy)
 
-    def get_callers(self, function_name: str, fuzzy: bool = True) -> List[Dict[str, Any]]:
+    def get_callers(
+        self, function_name: str, fuzzy: bool = True
+    ) -> list[dict[str, Any]]:
         """Get functions that call this function (inbound)."""
         return self._get_relations(function_name, "callers", fuzzy)
 
-    def _find_matching_functions(self, name: str, fuzzy: bool) -> List[str]:
+    def _find_matching_functions(self, name: str, fuzzy: bool) -> list[str]:
         all_funcs = (
             set(self.callees.keys())
             | set(self.callers.keys())

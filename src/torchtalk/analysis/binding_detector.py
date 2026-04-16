@@ -2,13 +2,13 @@
 """Cross-language binding detector for Python/C++/CUDA connections."""
 
 import logging
-from typing import List, Any, Tuple, Dict, Optional
-from dataclasses import dataclass, field
-from pathlib import Path
-from enum import Enum
 import re
+from dataclasses import dataclass, field
+from enum import Enum
+from pathlib import Path
+from typing import Any
 
-from .patterns import should_exclude, has_binding_patterns
+from .patterns import has_binding_patterns, should_exclude
 
 log = logging.getLogger(__name__)
 
@@ -36,14 +36,12 @@ class Binding:
     binding_type: str
     file_path: str
     line_number: int
-    dispatch_key: Optional[str] = None
-    namespace: Optional[str] = None
-    cuda_kernel: Optional[str] = None
-    implementation_file: Optional[str] = None
-    docstring: Optional[str] = None
-    signature: Optional[str] = None
+    dispatch_key: str | None = None
+    namespace: str | None = None
+    cuda_kernel: str | None = None
+    signature: str | None = None
 
-    def to_dict(self) -> Dict:
+    def to_dict(self) -> dict:
         return {
             "python_name": self.python_name,
             "cpp_name": self.cpp_name,
@@ -53,7 +51,6 @@ class Binding:
             "dispatch_key": self.dispatch_key,
             "namespace": self.namespace,
             "cuda_kernel": self.cuda_kernel,
-            "implementation_file": self.implementation_file,
             "signature": self.signature,
         }
 
@@ -65,17 +62,17 @@ class CUDAKernel:
     name: str
     file_path: str
     line_number: int
-    template_params: Optional[str] = None
-    parameters: Optional[str] = None
-    called_by: List[str] = field(default_factory=list)
+    template_params: str | None = None
+    parameters: str | None = None
+    called_by: list[str] = field(default_factory=list)
 
 
 @dataclass
 class BindingGraph:
     """Container for detected bindings and CUDA kernels."""
 
-    bindings: List[Binding] = field(default_factory=list)
-    cuda_kernels: List[CUDAKernel] = field(default_factory=list)
+    bindings: list[Binding] = field(default_factory=list)
+    cuda_kernels: list[CUDAKernel] = field(default_factory=list)
 
     def add_binding(self, binding: Binding):
         self.bindings.append(binding)
@@ -108,7 +105,6 @@ class BindingDetector:
             log.warning(f"Parse error for {file_path}: {e}")
             return graph
 
-        # Detect different binding patterns
         self._detect_pybind11_bindings(root_node, content, file_path, graph)
         self._detect_torch_library_bindings(content, file_path, graph)
 
@@ -122,7 +118,6 @@ class BindingDetector:
     def _detect_pybind11_bindings(
         self, node, content: str, file_path: str, graph: BindingGraph
     ):
-        # Find PYBIND11_MODULE declarations
         modules = self._find_pybind11_modules(node, content)
 
         for module_name, module_node in modules:
@@ -130,11 +125,9 @@ class BindingDetector:
                 module_node, content, file_path, module_name, graph
             )
 
-        # Also scan entire file for py::class_ patterns (PyTorch style)
-        # These may not be inside PYBIND11_MODULE but are still pybind11 bindings
         self._extract_standalone_pybind_patterns(content, file_path, graph)
 
-    def _find_pybind11_modules(self, node, content: str) -> List[Tuple[str, Any]]:
+    def _find_pybind11_modules(self, node, content: str) -> list[tuple[str, Any]]:
         modules = []
 
         if node.type == "function_definition":
@@ -169,12 +162,10 @@ class BindingDetector:
         body_text = self._get_node_text(body, content)
         body_start_line = body.start_point[0] + 1
 
-        # Extract function bindings
         self._extract_function_bindings(
             body_text, body_start_line, file_path, module_name, graph
         )
 
-        # Extract class bindings
         self._extract_class_bindings(
             body_text, body_start_line, file_path, module_name, graph
         )
@@ -382,7 +373,7 @@ class BindingDetector:
         base_line: int,
         file_path: str,
         namespace: str,
-        dispatch_key: Optional[str],
+        dispatch_key: str | None,
         graph: BindingGraph,
     ):
         # m.def("op_name(Tensor self) -> Tensor", ...)
@@ -395,7 +386,7 @@ class BindingDetector:
         for def_pattern in def_patterns:
             for match in re.finditer(def_pattern, block_content):
                 op_signature = match.group(1)
-                # Extract op name - may be prefixed like "aten::op_name" or "quantized::op_name"
+                # Op name may be prefixed: "aten::op" or "quantized::op"
                 # Pattern: optional_namespace::op_name(...)
                 op_name_match = re.match(r"(?:\w+::)?(\w+)", op_signature)
                 if op_name_match:
@@ -433,7 +424,6 @@ class BindingDetector:
             graph.add_binding(binding)
 
     def _detect_cuda_kernels(self, content: str, file_path: str, graph: BindingGraph):
-        # __global__ void kernel_name<T>(args...) or __global__ void kernel_name(args...)
         kernel_pattern = r"__global__\s+void\s+(\w+)(?:<([^>]+)>)?\s*\(([^)]*)\)"
 
         for match in re.finditer(kernel_pattern, content):
@@ -508,11 +498,9 @@ class BindingDetector:
             i += 1
         return i
 
-    def _find_enclosing_function(self, content: str, position: int) -> Optional[str]:
-        # Look backwards for function definition
+    def _find_enclosing_function(self, content: str, position: int) -> str | None:
         search_region = content[:position]
 
-        # Pattern for C++ function definition
         func_pattern = (
             r"(?:static\s+)?(?:inline\s+)?(?:\w+::)*(\w+)\s*\([^)]*\)\s*(?:const\s*)?\{"
         )
@@ -527,17 +515,10 @@ class BindingDetector:
         return content[node.start_byte : node.end_byte]
 
     def detect_bindings_in_directory(self, directory: str) -> BindingGraph:
-        """Scan a directory for cross-language bindings.
-
-        Uses shared configuration from config.py for exclusion and binding patterns.
-
-        Args:
-            directory: Directory to scan
-        """
+        """Scan a directory for cross-language bindings."""
         dir_path = Path(directory)
         combined_graph = BindingGraph()
 
-        # Find all C++/CUDA files
         extensions = ["*.cpp", "*.cc", "*.cxx", "*.cu", "*.cuh"]
         files = []
         for ext in extensions:
@@ -583,6 +564,7 @@ class BindingDetector:
         log.info(
             f"Total: {len(combined_graph.bindings)} bindings, "
             f"{len(combined_graph.cuda_kernels)} CUDA kernels "
-            f"(skipped {skipped_excluded} excluded, {skipped_no_patterns} without patterns)"
+            f"(skipped {skipped_excluded} excluded, "
+            f"{skipped_no_patterns} without patterns)"
         )
         return combined_graph

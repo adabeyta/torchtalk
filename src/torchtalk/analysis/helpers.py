@@ -1,6 +1,6 @@
 """Shared helper functions for TorchTalk analyzers."""
 
-from typing import Any, Dict, List, Set, Tuple
+from typing import Any
 
 
 def levenshtein_distance(s1: str, s2: str) -> int:
@@ -23,10 +23,10 @@ def levenshtein_distance(s1: str, s2: str) -> int:
     return previous_row[-1]
 
 
-def fuzzy_match(query: str, candidates: List[str], max_results: int = 10) -> List[str]:
+def fuzzy_match(query: str, candidates: list[str], max_results: int = 10) -> list[str]:
     """Find candidates matching query with fuzzy matching."""
     query_lower = query.lower()
-    results: List[Tuple[int, int, str]] = []  # (priority, length, name)
+    results: list[tuple[int, int, str]] = []  # (priority, length, name)
 
     # Exact matches (priority 0)
     exact = {c for c in candidates if query_lower == c.lower()}
@@ -48,7 +48,7 @@ def fuzzy_match(query: str, candidates: List[str], max_results: int = 10) -> Lis
                 results.append((2 + dist, len(candidate), candidate))
 
     results.sort(key=lambda x: (x[0], x[1]))
-    seen: Set[str] = set()
+    seen: set[str] = set()
     return [n for _, _, n in results if not (n in seen or seen.add(n))][:max_results]
 
 
@@ -66,9 +66,9 @@ def truncate(text: str, max_len: int = 80) -> str:
     return text[: max_len - 3] + "..."
 
 
-def dedupe_by_key(items: List[Dict], key: str) -> List[Dict]:
+def dedupe_by_key(items: list[dict], key: str) -> list[dict]:
     """Deduplicate list of dicts by a key."""
-    seen: Set[Any] = set()
+    seen: set[Any] = set()
     result = []
     for item in items:
         if (val := item.get(key)) and val not in seen:
