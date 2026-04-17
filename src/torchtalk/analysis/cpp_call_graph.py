@@ -24,6 +24,20 @@ except ImportError:
     log.warning("libclang not available - C++ call graph extraction disabled")
 
 
+def _rel_to_root(path: str, source_root: str) -> str | None:
+    """Return path relative to source_root, or None if outside the tree."""
+    if not path:
+        return None
+    try:
+        resolved = os.path.realpath(path)
+        root = os.path.realpath(source_root)
+    except OSError:
+        return None
+    if resolved == root or resolved.startswith(root + os.sep):
+        return os.path.relpath(resolved, root)
+    return None
+
+
 def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
     """Parse a single file and extract call graph data (runs in subprocess)."""
     file_path, compile_args = args
@@ -32,6 +46,7 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         "callees": {},
         "callers": {},
         "function_locations": {},
+        "includes": [],
         "success": False,
         "error": None,
     }
@@ -85,9 +100,22 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
                 extract_calls(child, current_function)
 
         extract_calls(tu.cursor)
+
+        includes = []
+        seen = set()
+        for fi in tu.get_includes():
+            inc_file = fi.include
+            if inc_file is None:
+                continue
+            name = str(inc_file.name)
+            if name and name not in seen:
+                seen.add(name)
+                includes.append(name)
+
         result["callees"] = {k: list(v) for k, v in callees.items()}
         result["callers"] = {k: list(v) for k, v in callers.items()}
         result["function_locations"] = function_locations
+        result["includes"] = includes
         result["success"] = True
     except Exception as e:
         result["error"] = str(e)
@@ -113,6 +141,16 @@ class CppCallGraphExtractor:
         self.callers: dict[str, set[str]] = defaultdict(set)
         self.function_locations: dict[str, tuple[str, int]] = {}
         self.processed_files: set[str] = set()
+
+        # Per-file attribution. Lets incremental updates evict contributions
+        # from one file without losing edges still supplied by another.
+        self.file_records: dict[str, dict] = {}
+
+        # Per-TU include sets (repo-relative paths). Powers cross-TU
+        # invalidation when a header changes: find every TU whose includes
+        # intersect the changed header set, and re-parse those TUs.
+        # Keys are repo-relative TU paths (for checkout portability).
+        self.tu_includes: dict[str, list[str]] = {}
 
     def extract_from_pytorch_parallel(
         self,
@@ -193,23 +231,16 @@ class CppCallGraphExtractor:
         with Pool(processes=num_workers) as pool:
             results = pool.map(_parse_single_file, entries)
 
-        # Merge results
+        # Merge results, attributing each record to the file where the
+        # function (or caller) is defined — not the TU that observed it.
+        # Without this, inline defs in headers get duplicated once per TU.
         success_count = 0
         for result in results:
             if result["success"]:
                 success_count += 1
+                self._merge_parse_result(result, source_root=str(source))
 
-                # Merge callees
-                for func, called in result["callees"].items():
-                    self.callees[func].update(called)
-
-                # Merge callers
-                for func, callers_list in result["callers"].items():
-                    self.callers[func].update(callers_list)
-
-                # Merge function locations
-                self.function_locations.update(result["function_locations"])
-                self.processed_files.add(result["file"])
+        self._rebuild_aggregates()
 
         log.info(f"Completed: {success_count}/{len(entries)} files succeeded")
         log.info(
@@ -220,16 +251,213 @@ class CppCallGraphExtractor:
         return self.get_call_graph_data()
 
     def get_call_graph_data(self) -> dict[str, Any]:
+        # Intern tu_includes paths: PyTorch has ~8k unique headers but ~2M
+        # TU→header references. Storing indices into a shared path list cuts
+        # the cache from ~120 MB to ~15 MB on PyTorch.
+        path_to_idx: dict[str, int] = {}
+        paths_list: list[str] = []
+        tu_includes_idx: dict[str, list[int]] = {}
+        for tu, includes in self.tu_includes.items():
+            indices = []
+            for p in includes:
+                idx = path_to_idx.get(p)
+                if idx is None:
+                    idx = len(paths_list)
+                    path_to_idx[p] = idx
+                    paths_list.append(p)
+                indices.append(idx)
+            tu_includes_idx[tu] = indices
+
         return {
             "callees": {k: list(v) for k, v in self.callees.items()},
             "callers": {k: list(v) for k, v in self.callers.items()},
             "function_locations": self.function_locations,
+            "file_records": self.file_records,
+            "tu_includes_paths": paths_list,
+            "tu_includes_idx": tu_includes_idx,
             "stats": {
                 "total_functions": len(self.function_locations),
                 "total_call_edges": sum(len(v) for v in self.callees.values()),
                 "files_processed": len(self.processed_files),
             },
         }
+
+    def _record_for(self, owner_file: str) -> dict[str, Any]:
+        """Get or create the file_records entry for a defining file."""
+        return self.file_records.setdefault(
+            owner_file,
+            {"callees": {}, "callers": {}, "function_locations": {}},
+        )
+
+    def _merge_parse_result(
+        self, result: dict[str, Any], source_root: str | None = None
+    ) -> None:
+        """Attribute a TU's parse output to the file where each function is defined.
+
+        Each edge (caller → callee) lives in the record of the file that
+        DEFINES the caller. Function locations live in their own defining
+        file's record. This keeps file_records evictable per-file without
+        duplicating header inline definitions across every TU that includes
+        them.
+
+        When source_root is given, the TU's include set is stored (repo-relative)
+        so a later header change can invalidate this TU.
+        """
+        locations = result.get("function_locations", {})
+        callees = result.get("callees", {})
+
+        for func, loc in locations.items():
+            if not loc:
+                continue
+            loc_tuple = tuple(loc) if isinstance(loc, list) else loc
+            owner = loc_tuple[0]
+            self._record_for(owner)["function_locations"][func] = loc_tuple
+
+        for caller, callee_list in callees.items():
+            loc = locations.get(caller)
+            if not loc:
+                continue
+            owner = loc[0]
+            rec = self._record_for(owner)
+
+            out = rec["callees"].setdefault(caller, [])
+            out_set = set(out)
+            for c in callee_list:
+                if c not in out_set:
+                    out.append(c)
+                    out_set.add(c)
+
+            for c in callee_list:
+                inc = rec["callers"].setdefault(c, [])
+                if caller not in inc:
+                    inc.append(caller)
+
+        if source_root:
+            tu_rel = _rel_to_root(result.get("file", ""), source_root)
+            if tu_rel is not None:
+                self.tu_includes[tu_rel] = sorted(
+                    {
+                        rel
+                        for h in result.get("includes", [])
+                        if (rel := _rel_to_root(h, source_root)) is not None
+                    }
+                )
+
+    def _rebuild_aggregates(self) -> None:
+        """Rebuild aggregates and processed_files from file_records."""
+        self.callees = defaultdict(set)
+        self.callers = defaultdict(set)
+        self.function_locations = {}
+        self.processed_files = set()
+
+        for file_path, rec in self.file_records.items():
+            for func, called in rec.get("callees", {}).items():
+                self.callees[func].update(called)
+            for func, callers_list in rec.get("callers", {}).items():
+                self.callers[func].update(callers_list)
+            self.function_locations.update(rec.get("function_locations", {}))
+            self.processed_files.add(file_path)
+
+    def update_files(
+        self,
+        entries: list[tuple[str, list[str]]],
+        removed: list[str] | None = None,
+        num_workers: int | None = None,
+        source_root: str | None = None,
+    ) -> dict[str, int]:
+        """Re-parse the given files and evict stale per-file contributions.
+
+        entries: (file_path, compile_args) tuples for files to re-parse.
+        removed: absolute paths whose contributions should be evicted with no
+                 re-parse (for deleted files).
+        source_root: if given, per-TU include sets are updated for the re-parsed
+                 TUs so subsequent header changes can invalidate them.
+
+        Raises RuntimeError if the extractor has no per-file attribution
+        (loaded from a legacy cache) — caller should fall back to a full build.
+        """
+        if self.file_records is None or (
+            not self.file_records and self.function_locations
+        ):
+            raise RuntimeError(
+                "Call graph has no per-file attribution (legacy cache). "
+                "Rebuild with 'torchtalk index build'."
+            )
+
+        for f in removed or []:
+            self.file_records.pop(f, None)
+            if source_root and (rel := _rel_to_root(f, source_root)):
+                self.tu_includes.pop(rel, None)
+
+        for file, _ in entries:
+            self.file_records.pop(file, None)
+            if source_root and (rel := _rel_to_root(file, source_root)):
+                self.tu_includes.pop(rel, None)
+
+        results: list[dict[str, Any]] = []
+        if entries:
+            if num_workers is None:
+                num_workers = max(1, int(cpu_count() * 0.8))
+            if len(entries) > 1 and num_workers > 1:
+                with Pool(processes=num_workers) as pool:
+                    results = pool.map(_parse_single_file, entries)
+            else:
+                results = [_parse_single_file(e) for e in entries]
+
+            for result in results:
+                if result["success"]:
+                    self._merge_parse_result(result, source_root=source_root)
+
+        self._rebuild_aggregates()
+
+        return {
+            "files_updated": sum(1 for r in results if r["success"]),
+            "files_failed": sum(1 for r in results if not r["success"]),
+            "files_removed": len(removed or []),
+            "total_functions": len(self.function_locations),
+        }
+
+    def find_affected_tus(self, changed_files: set[str]) -> set[str]:
+        """Return repo-relative TU paths whose include set intersects changed_files.
+
+        changed_files must be repo-relative paths. Returns TU paths whose
+        recorded include set contains any of them. Use this to pick TUs to
+        re-parse when a header file changes.
+        """
+        if not changed_files:
+            return set()
+        affected: set[str] = set()
+        for tu_rel, includes in self.tu_includes.items():
+            if any(h in changed_files for h in includes):
+                affected.add(tu_rel)
+        return affected
+
+    def known_headers(self) -> set[str]:
+        """Return every header path present in any TU's recorded include set.
+
+        Used to detect incomplete baseline coverage: a changed header outside
+        this set can't be resolved to an affected TU, which may indicate a
+        baseline parse failure, a generated header added since baseline, or a
+        truly unused header.
+        """
+        result: set[str] = set()
+        for v in self.tu_includes.values():
+            result.update(v)
+        return result
+
+    def load_from_path(self, cache_path: Path) -> bool:
+        """Load a call graph JSON from an arbitrary path (not in cache_dir)."""
+        if not cache_path.exists():
+            return False
+        try:
+            with open(cache_path) as f:
+                data = json.load(f)
+            self._apply_loaded_data(data)
+            log.info(f"Loaded call graph from {cache_path}")
+            return True
+        except Exception as e:
+            log.warning(f"Failed to load call graph from {cache_path}: {e}")
+            return False
 
     def _get_relations(
         self, function_name: str, direction: str, fuzzy: bool = True
@@ -355,24 +583,49 @@ class CppCallGraphExtractor:
         cache_path = self.cache_dir / f"{cache_key}.json"
         if not cache_path.exists():
             return False
-
         try:
             with open(cache_path) as f:
                 data = json.load(f)
-
-            self.callees = defaultdict(
-                set, {k: set(v) for k, v in data.get("callees", {}).items()}
-            )
-            self.callers = defaultdict(
-                set, {k: set(v) for k, v in data.get("callers", {}).items()}
-            )
-            self.function_locations = data.get("function_locations", {})
-            self.function_locations = {
-                k: tuple(v) if isinstance(v, list) else v
-                for k, v in self.function_locations.items()
-            }
+            self._apply_loaded_data(data)
             log.info(f"Loaded call graph cache from {cache_path}")
             return True
         except Exception as e:
             log.warning(f"Failed to load cache: {e}")
             return False
+
+    def _apply_loaded_data(self, data: dict[str, Any]) -> None:
+        """Populate aggregates + file_records from a loaded JSON payload."""
+        self.callees = defaultdict(
+            set, {k: set(v) for k, v in data.get("callees", {}).items()}
+        )
+        self.callers = defaultdict(
+            set, {k: set(v) for k, v in data.get("callers", {}).items()}
+        )
+        self.function_locations = {
+            k: tuple(v) if isinstance(v, list) else v
+            for k, v in data.get("function_locations", {}).items()
+        }
+        raw_records = data.get("file_records") or {}
+        self.file_records = {
+            path: {
+                "callees": rec.get("callees", {}),
+                "callers": rec.get("callers", {}),
+                "function_locations": {
+                    k: tuple(v) if isinstance(v, list) else v
+                    for k, v in rec.get("function_locations", {}).items()
+                },
+            }
+            for path, rec in raw_records.items()
+        }
+        # Prefer interned form (current); fall back to flat list (early caches).
+        paths_list = data.get("tu_includes_paths")
+        idx_map = data.get("tu_includes_idx")
+        if paths_list is not None and idx_map is not None:
+            self.tu_includes = {
+                tu: [paths_list[i] for i in indices] for tu, indices in idx_map.items()
+            }
+        else:
+            self.tu_includes = {
+                k: list(v) for k, v in (data.get("tu_includes") or {}).items()
+            }
+        self.processed_files = set(self.file_records)

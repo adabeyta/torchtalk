@@ -77,8 +77,7 @@ class TestFormatterFactory:
         set_formatter_mode("compact")
 
     def test_invalid_mode_raises(self):
-        try:
+        import pytest
+
+        with pytest.raises(ValueError):
             set_formatter_mode("invalid")
-            assert False, "Should have raised"
-        except ValueError:
-            pass

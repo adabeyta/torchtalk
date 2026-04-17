@@ -712,3 +712,250 @@ def _auto_detect_pytorch() -> str | None:
     CLI flag is handled upstream in run_server().
     """
     return resolve_pytorch_source()
+
+
+def update_index(source: str, since: str) -> dict:
+    """Incrementally refresh the bindings index using a prior snapshot as baseline.
+
+    Re-detects only C++/CUDA files that changed in git between the snapshot's
+    recorded commit and current HEAD. YAML files are re-parsed when they change.
+    The C++ call graph is NOT incrementally updated and may be stale; run
+    `torchtalk index build` to rebuild it.
+    """
+    import subprocess
+    from dataclasses import asdict
+
+    from .analysis.binding_detector import BindingDetector
+    from .snapshots import _relpath, _snapshot_dir, read_manifest
+
+    manifest = read_manifest(since)
+    if not manifest.git_commit:
+        raise ValueError(
+            f"Snapshot '{since}' has no git_commit; cannot diff against HEAD"
+        )
+
+    snap_dir = _snapshot_dir(since)
+    prior = json.loads((snap_dir / "bindings.json").read_text())
+
+    try:
+        diff_out = subprocess.run(
+            [
+                "git",
+                "-C",
+                source,
+                "diff",
+                "--name-status",
+                f"{manifest.git_commit}..HEAD",
+            ],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=30,
+        ).stdout
+    except (subprocess.CalledProcessError, FileNotFoundError) as e:
+        raise RuntimeError(f"git diff failed: {e}") from e
+
+    cpp_exts = (".cpp", ".cc", ".cxx", ".cu", ".cuh")
+    header_exts = (".h", ".hpp", ".hxx", ".hh", ".inc")
+    yaml_files = {
+        "aten/src/ATen/native/native_functions.yaml",
+        "tools/autograd/derivatives.yaml",
+    }
+
+    changed_cpp: set[str] = set()
+    removed_cpp: set[str] = set()
+    changed_headers: set[str] = set()
+    yaml_changed = False
+    for line in diff_out.splitlines():
+        parts = line.split("\t")
+        if len(parts) < 2:
+            continue
+        status, path = parts[0], parts[-1]
+        if path in yaml_files:
+            yaml_changed = True
+        if path.endswith(header_exts):
+            changed_headers.add(path)
+            continue
+        if not path.endswith(cpp_exts):
+            continue
+        (removed_cpp if status.startswith("D") else changed_cpp).add(path)
+
+    dirty = changed_cpp | removed_cpp
+    prior_source = manifest.pytorch_source
+    new_bindings = [
+        b
+        for b in prior.get("bindings", [])
+        if _relpath(b.get("file_path", ""), prior_source) not in dirty
+    ]
+    new_kernels = [
+        k
+        for k in prior.get("cuda_kernels", [])
+        if _relpath(k.get("file_path", ""), prior_source) not in dirty
+    ]
+
+    detector = BindingDetector()
+    src = Path(source)
+    for rel in changed_cpp:
+        full = src / rel
+        if not full.exists():
+            continue
+        try:
+            content = full.read_text(errors="ignore")
+        except OSError:
+            continue
+        g = detector.detect_bindings(str(full), content)
+        new_bindings.extend(b.to_dict() for b in g.bindings)
+        new_kernels.extend(asdict(k) for k in g.cuda_kernels)
+
+    if yaml_changed:
+        functions, derivatives = _parse_native_functions(source)
+        implementations = _find_implementations(source, functions)
+    else:
+        functions = prior.get("native_functions", {})
+        derivatives = prior.get("derivatives", {})
+        implementations = prior.get("native_implementations", {})
+
+    data = {
+        "bindings": new_bindings,
+        "cuda_kernels": new_kernels,
+        "native_functions": functions,
+        "derivatives": derivatives,
+        "native_implementations": implementations,
+        "metadata": {
+            "source_path": source,
+            "source_fingerprint": _source_fingerprint(source),
+            "updated_since": since,
+            "updated_commit": manifest.git_commit,
+        },
+    }
+
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache = _cache_path(source)
+    with open(cache, "w") as f:
+        json.dump(data, f)
+
+    cg_stats = _update_call_graph(
+        source, since, changed_cpp, removed_cpp, changed_headers
+    )
+
+    return {
+        "cpp_files_changed": len(changed_cpp),
+        "cpp_files_removed": len(removed_cpp),
+        "headers_changed": len(changed_headers),
+        "yaml_changed": yaml_changed,
+        "bindings_total": len(new_bindings),
+        "cuda_kernels_total": len(new_kernels),
+        "baseline_snapshot": since,
+        "baseline_commit": manifest.git_commit,
+        "call_graph": cg_stats,
+    }
+
+
+def _update_call_graph(
+    source: str,
+    since: str,
+    changed_cpp: set[str],
+    removed_cpp: set[str],
+    changed_headers: set[str],
+) -> dict[str, Any]:
+    """Incrementally refresh the C++ call graph using a snapshot as baseline.
+
+    Loads the baseline call graph, computes which TUs a header change affects
+    via recorded per-TU include sets, evicts per-file records for the union of
+    changed cpp + header-affected TUs + removed files, re-parses the dirty
+    TUs, and writes the result to the active cache.
+    """
+    import os
+
+    from .analysis.cpp_call_graph import LIBCLANG_AVAILABLE, CppCallGraphExtractor
+    from .snapshots import _snapshot_dir
+
+    if not LIBCLANG_AVAILABLE:
+        return {"skipped": "libclang not available"}
+
+    snap_cg = _snapshot_dir(since) / "callgraph.json"
+    if not snap_cg.exists():
+        return {"skipped": "baseline snapshot has no call graph"}
+
+    cg_cache_dir = CACHE_DIR / "call_graph"
+    cache_key = f"pytorch_callgraph_parallel_{source_hash(source)}"
+
+    extractor = CppCallGraphExtractor(cache_dir=cg_cache_dir)
+    if not extractor.load_from_path(snap_cg):
+        return {"skipped": "failed to load baseline call graph"}
+
+    header_affected = extractor.find_affected_tus(changed_headers)
+    tus_to_reparse = set(changed_cpp) | header_affected
+
+    uncovered = changed_headers - extractor.known_headers()
+
+    src = Path(source)
+    compile_commands = src / "compile_commands.json"
+    if not compile_commands.exists():
+        compile_commands = src / "build" / "compile_commands.json"
+
+    entries: list[tuple[str, list[str]]] = []
+    if compile_commands.exists() and tus_to_reparse:
+        with open(compile_commands) as f:
+            compile_db = json.load(f)
+        cc_index: dict[str, dict] = {}
+        for entry in compile_db:
+            fp = entry.get("file", "")
+            directory = entry.get("directory", "")
+            if not os.path.isabs(fp) and directory:
+                fp = os.path.join(directory, fp)
+            cc_index[fp] = entry
+
+        for rel in tus_to_reparse:
+            full = str(src / rel)
+            entry = cc_index.get(full)
+            if entry is None:
+                continue
+            command = entry.get("command", "")
+            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
+            entries.append((full, args))
+
+    removed_abs = [str(src / r) for r in removed_cpp]
+
+    try:
+        stats = extractor.update_files(entries, removed=removed_abs, source_root=source)
+    except RuntimeError as e:
+        return {"skipped": str(e)}
+
+    stats["header_affected_tus"] = len(header_affected)
+    stats["uncovered_headers"] = len(uncovered)
+    stats["uncovered_sample"] = sorted(uncovered)[:5]
+
+    extractor.save_cache(cache_key)
+    return stats
+
+
+def build_index(source: str, wait_for_cpp: bool = True) -> dict:
+    """Build or refresh the index for a PyTorch source and return stats.
+
+    Headless equivalent of `mcp-serve` startup. Blocks on the C++ call graph
+    when wait_for_cpp is True; otherwise returns while it builds in the
+    background.
+    """
+    _init_from_source(source)
+
+    if wait_for_cpp and _state.cpp_thread is not None and _state.cpp_thread.is_alive():
+        log.info("Waiting for C++ call graph build to finish...")
+        _state.cpp_thread.join()
+
+    cg_functions = 0
+    if _state.cpp_extractor is not None:
+        cg_functions = len(_state.cpp_extractor.function_locations)
+
+    return {
+        "bindings": len(_state.bindings),
+        "cuda_kernels": len(_state.cuda_kernels),
+        "native_functions": len(_state.native_functions),
+        "derivatives": len(_state.derivatives),
+        "call_graph_functions": cg_functions,
+        "call_graph_building": _state.cpp_building,
+        "python_modules": len(_state.py_modules),
+        "nn_modules": len(_state.nn_modules),
+        "test_files": len(_state.test_files),
+        "test_functions": len(_state.test_functions),
+    }
