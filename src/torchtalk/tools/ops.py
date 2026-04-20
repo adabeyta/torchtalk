@@ -5,8 +5,13 @@ from __future__ import annotations
 from typing import Literal
 
 from ..analysis.helpers import safe_sort_key, truncate
-from ..formatting import create_formatter, relative_path
+from ..formatting import coverage_note, create_formatter, relative_path
 from ..indexer import _ensure_loaded, _fuzzy_find, _state
+
+
+def _with_note(text: str) -> str:
+    note = coverage_note(_state.cpp_extractor)
+    return f"{text}\n\n{note}" if note else text
 
 
 def _rel_path(path: str) -> str:
@@ -188,7 +193,7 @@ async def trace(
         else:
             md.text(f"Function `{function_name}` not found in PyTorch bindings.")
 
-    return md.build()
+    return _with_note(md.build())
 
 
 async def _do_cuda_kernels(function_name: str = "") -> str:
@@ -205,8 +210,8 @@ async def _do_cuda_kernels(function_name: str = "") -> str:
 
     if not kernels:
         if function_name:
-            return f"No CUDA kernels found matching '{function_name}'."
-        return "No CUDA kernels found."
+            return _with_note(f"No CUDA kernels found matching '{function_name}'.")
+        return _with_note("No CUDA kernels found.")
 
     md.text(f"Found {len(kernels)} kernel(s)\n")
 
@@ -223,7 +228,7 @@ async def _do_cuda_kernels(function_name: str = "") -> str:
     if len(kernels) > 15:
         md.text(f"\n*Showing 15 of {len(kernels)} kernels*")
 
-    return md.build()
+    return _with_note(md.build())
 
 
 async def _do_search_bindings(query: str, backend: str = "", limit: int = 10) -> str:

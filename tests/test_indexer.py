@@ -185,3 +185,48 @@ class TestUpdateIndex:
         written = json.loads(Path(cache / "bindings.json").read_text())
         names = {b["python_name"] for b in written["bindings"]}
         assert names == {"stable", "reindexed"}
+
+
+class TestWidenReparseSet:
+    def test_returns_empty_for_no_uncovered(self, tmp_path):
+        assert indexer._widen_reparse_set(tmp_path, set(), {}) == set()
+
+    def test_filters_grep_results_to_compile_db(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        def fake_run(cmd, **kw):
+            class R:
+                returncode = 0
+                stdout = "a.cpp\nb.cpp\nnot_compiled.cpp\n"
+
+            return R()
+
+        monkeypatch.setattr(sp, "run", fake_run)
+
+        cc_index = {
+            str(tmp_path / "a.cpp"): {},
+            str(tmp_path / "b.cpp"): {},
+        }
+        result = indexer._widen_reparse_set(tmp_path, {"foo.h"}, cc_index)
+        assert result == {"a.cpp", "b.cpp"}
+
+    def test_git_grep_missing_skips_silently(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        def fake_run(cmd, **kw):
+            raise FileNotFoundError("git missing")
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        assert indexer._widen_reparse_set(tmp_path, {"foo.h"}, {}) == set()
+
+    def test_git_grep_timeout_skips_header(self, tmp_path, monkeypatch):
+        import subprocess as sp
+
+        def fake_run(cmd, **kw):
+            raise sp.TimeoutExpired(cmd=cmd, timeout=30)
+
+        monkeypatch.setattr(sp, "run", fake_run)
+        assert indexer._widen_reparse_set(tmp_path, {"foo.h"}, {}) == set()
+
+    def test_header_with_empty_basename_skipped(self, tmp_path):
+        assert indexer._widen_reparse_set(tmp_path, {""}, {}) == set()

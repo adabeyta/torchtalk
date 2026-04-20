@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 from ..analysis.helpers import dedupe_by_key
-from ..formatting import create_formatter, relative_path
+from ..formatting import coverage_note, create_formatter, relative_path
 from ..indexer import _cpp_status, _ensure_loaded, _state
 
 
 def _rel_path(path: str) -> str:
     return relative_path(path, _state.pytorch_source)
+
+
+def _with_note(text: str) -> str:
+    note = coverage_note(_state.cpp_extractor)
+    return f"{text}\n\n{note}" if note else text
 
 
 def _format_call_item(md, item: dict, name_key: str, file_key: str, line_key: str):
@@ -27,7 +32,7 @@ async def _do_calls(function_name: str) -> str:
 
     callees = _state.cpp_extractor.get_callees(function_name, fuzzy=True)
     if not callees:
-        return f"No outbound calls found for '{function_name}'."
+        return _with_note(f"No outbound calls found for '{function_name}'.")
 
     results = dedupe_by_key(callees, "callee")
 
@@ -41,7 +46,7 @@ async def _do_calls(function_name: str) -> str:
     if len(results) > 15:
         md.text(f"\n*Showing 15 of {len(results)} calls.*")
 
-    return md.build()
+    return _with_note(md.build())
 
 
 async def _do_called_by(function_name: str) -> str:
@@ -51,7 +56,7 @@ async def _do_called_by(function_name: str) -> str:
 
     callers = _state.cpp_extractor.get_callers(function_name, fuzzy=True)
     if not callers:
-        return f"No inbound callers found for '{function_name}'."
+        return _with_note(f"No inbound callers found for '{function_name}'.")
 
     results = dedupe_by_key(callers, "caller")
 
@@ -65,7 +70,7 @@ async def _do_called_by(function_name: str) -> str:
     if len(results) > 15:
         md.text(f"\n*Showing 15 of {len(results)} callers.*")
 
-    return md.build()
+    return _with_note(md.build())
 
 
 async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers") -> str:
@@ -98,7 +103,7 @@ async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers")
             break
 
     if not callers_by_depth:
-        return f"No callers found for '{function_name}'."
+        return _with_note(f"No callers found for '{function_name}'.")
 
     md = create_formatter()
     md.h2(f"Impact Analysis: `{function_name}`")
@@ -139,4 +144,4 @@ async def _do_impact(function_name: str, depth: int = 2, focus: str = "callers")
 
     md.text(f"Total impact: {total} functions across {len(callers_by_depth)} levels")
 
-    return md.build()
+    return _with_note(md.build())

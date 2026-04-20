@@ -310,3 +310,181 @@ class TestPersistence:
 
 def _extractor_contains_edges(ext, pairs):
     return all(callee in ext.callees[caller] for caller, callee in pairs)
+
+
+class TestTuStatus:
+    def test_coverage_summary_counts_each_bucket(self, extractor):
+        extractor.tu_status = {
+            "a.cpp": "ok",
+            "b.cpp": "ok",
+            "c.cpp": "parse_failed",
+            "d.cu": "unsupported_language",
+            "e.cpp": "filtered",
+            "f.cpp": "filtered",
+            "g.cpp": "filtered",
+        }
+        assert extractor.coverage_summary() == {
+            "ok": 2,
+            "parse_failed": 1,
+            "unsupported_language": 1,
+            "filtered": 3,
+        }
+
+    def test_coverage_summary_empty_when_no_tus_tracked(self, extractor):
+        assert extractor.coverage_summary() == {}
+
+    def test_update_files_sets_ok_on_successful_parse(
+        self, extractor, monkeypatch, tmp_path
+    ):
+        source_root = tmp_path / "src"
+        source_root.mkdir()
+        tu = source_root / "foo.cpp"
+        tu.write_text("")
+
+        def fake_parse(args):
+            return {
+                "file": str(tu),
+                "callees": {"f": ["g"]},
+                "callers": {},
+                "function_locations": {"f": (str(tu), 1)},
+                "success": True,
+                "error": None,
+            }
+
+        monkeypatch.setattr(cpp_call_graph, "_parse_single_file", fake_parse)
+        extractor.update_files(entries=[(str(tu), [])], source_root=str(source_root))
+        assert extractor.tu_status["foo.cpp"] == "ok"
+
+    def test_update_files_sets_parse_failed_on_failure(
+        self, extractor, monkeypatch, tmp_path
+    ):
+        source_root = tmp_path / "src"
+        source_root.mkdir()
+        tu = source_root / "bad.cpp"
+        tu.write_text("")
+
+        def fake_parse(args):
+            return {
+                "file": str(tu),
+                "callees": {},
+                "callers": {},
+                "function_locations": {},
+                "success": False,
+                "error": "boom",
+            }
+
+        monkeypatch.setattr(cpp_call_graph, "_parse_single_file", fake_parse)
+        extractor.update_files(entries=[(str(tu), [])], source_root=str(source_root))
+        assert extractor.tu_status["bad.cpp"] == "parse_failed"
+
+    def test_update_files_evicts_status_for_removed(self, extractor, tmp_path):
+        source_root = tmp_path / "src"
+        source_root.mkdir()
+        gone = source_root / "gone.cpp"
+        gone.write_text("")
+        _seed(
+            extractor,
+            {
+                str(gone): {
+                    "callees": {"d": ["t"]},
+                    "function_locations": {"d": (str(gone), 1)},
+                }
+            },
+        )
+        extractor.tu_status["gone.cpp"] = "ok"
+
+        extractor.update_files(
+            entries=[], removed=[str(gone)], source_root=str(source_root)
+        )
+        assert "gone.cpp" not in extractor.tu_status
+
+    def test_save_load_round_trips_tu_status(self, extractor, tmp_path):
+        _seed(extractor, {"/a.cpp": {"function_locations": {"f": ("/a.cpp", 1)}}})
+        extractor.tu_status = {
+            "a.cpp": "ok",
+            "b.cu": "unsupported_language",
+            "c.cpp": "filtered",
+        }
+        extractor.save_cache("status-key")
+
+        ext2 = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert ext2.load_cache("status-key")
+        assert ext2.tu_status == extractor.tu_status
+
+    def test_load_without_tu_status_yields_empty(self, extractor, tmp_path):
+        legacy_path = tmp_path / "legacy.json"
+        legacy_path.write_text(
+            json.dumps(
+                {
+                    "callees": {"f": ["g"]},
+                    "callers": {},
+                    "function_locations": {"f": ["/a.cpp", 1]},
+                    "file_records": {
+                        "/a.cpp": {
+                            "callees": {"f": ["g"]},
+                            "callers": {},
+                            "function_locations": {"f": ["/a.cpp", 1]},
+                        }
+                    },
+                }
+            )
+        )
+        assert extractor.load_from_path(legacy_path)
+        assert extractor.tu_status == {}
+
+
+class TestCollectIncludeDirs:
+    def test_parses_dash_I_joined_form(self, tmp_path):
+        src = tmp_path / "src"
+        (src / "a").mkdir(parents=True)
+        db = [{"command": f"g++ -I{src}/a -c foo.cpp", "directory": str(src)}]
+        assert cpp_call_graph._collect_include_dirs(db, str(src)) == ["a"]
+
+    def test_parses_dash_I_spaced_form(self, tmp_path):
+        src = tmp_path / "src"
+        (src / "a").mkdir(parents=True)
+        db = [{"arguments": ["g++", "-I", f"{src}/a", "-c", "foo.cpp"]}]
+        assert cpp_call_graph._collect_include_dirs(db, str(src)) == ["a"]
+
+    def test_drops_dirs_outside_source_root(self, tmp_path):
+        src = tmp_path / "src"
+        src.mkdir()
+        db = [{"command": "g++ -I/usr/include -I/opt/other -c foo.cpp"}]
+        assert cpp_call_graph._collect_include_dirs(db, str(src)) == []
+
+    def test_dedupes_across_entries_and_sorts(self, tmp_path):
+        src = tmp_path / "src"
+        for d in ("a", "b", "c"):
+            (src / d).mkdir(parents=True)
+        db = [
+            {"command": f"g++ -I{src}/b -I{src}/a -c 1.cpp"},
+            {"command": f"g++ -I{src}/a -I{src}/c -c 2.cpp"},
+        ]
+        assert cpp_call_graph._collect_include_dirs(db, str(src)) == ["a", "b", "c"]
+
+    def test_empty_db_returns_empty(self, tmp_path):
+        assert cpp_call_graph._collect_include_dirs([], str(tmp_path)) == []
+
+
+class TestIncludeDirsPersistence:
+    def test_save_load_round_trips_include_dirs(self, extractor, tmp_path):
+        _seed(extractor, {"/a.cpp": {"function_locations": {"f": ("/a.cpp", 1)}}})
+        extractor.include_dirs = ["aten/src", "c10", "torch/csrc"]
+        extractor.save_cache("idirs-key")
+
+        ext2 = CppCallGraphExtractor(cache_dir=tmp_path)
+        assert ext2.load_cache("idirs-key")
+        assert ext2.include_dirs == ["aten/src", "c10", "torch/csrc"]
+
+    def test_stats_field_exposes_include_dirs_count(self, extractor):
+        extractor.include_dirs = ["a", "b", "c", "d"]
+        data = extractor.get_call_graph_data()
+        assert data["stats"]["include_dirs_count"] == 4
+
+    def test_legacy_cache_without_include_dirs_loads_empty(self, extractor, tmp_path):
+        legacy = tmp_path / "legacy.json"
+        legacy.write_text(
+            json.dumps({"callees": {}, "callers": {}, "function_locations": {}})
+        )
+        assert extractor.load_from_path(legacy)
+        assert extractor.include_dirs == []

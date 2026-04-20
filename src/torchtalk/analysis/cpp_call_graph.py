@@ -38,6 +38,36 @@ def _rel_to_root(path: str, source_root: str) -> str | None:
     return None
 
 
+def _collect_include_dirs(compile_db: list[dict], source_root: str) -> list[str]:
+    """Union of `-I` dirs under source_root, repo-relative, sorted.
+
+    Handles both `-Ipath` and `-I path`. External / absolute-not-under-root
+    entries are dropped. Output feeds diagnostics only — does not invalidate.
+    """
+    dirs: set[str] = set()
+    for entry in compile_db:
+        cmd = entry.get("command", "")
+        args = cmd.split() if cmd else entry.get("arguments", [])
+        i = 0
+        while i < len(args):
+            a = args[i]
+            if a == "-I" and i + 1 < len(args):
+                candidate = args[i + 1]
+                i += 2
+            elif a.startswith("-I") and len(a) > 2:
+                candidate = a[2:]
+                i += 1
+            else:
+                i += 1
+                continue
+            if not candidate:
+                continue
+            rel = _rel_to_root(candidate, source_root)
+            if rel is not None:
+                dirs.add(rel)
+    return sorted(dirs)
+
+
 def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
     """Parse a single file and extract call graph data (runs in subprocess)."""
     file_path, compile_args = args
@@ -152,6 +182,13 @@ class CppCallGraphExtractor:
         # Keys are repo-relative TU paths (for checkout portability).
         self.tu_includes: dict[str, list[str]] = {}
 
+        # Repo-relative TU path → one of:
+        # ok | parse_failed | unsupported_language | filtered
+        self.tu_status: dict[str, str] = {}
+
+        # Union of -I dirs seen in compile_commands.json, repo-relative, sorted.
+        self.include_dirs: list[str] = []
+
     def extract_from_pytorch_parallel(
         self,
         pytorch_source: str,
@@ -185,49 +222,46 @@ class CppCallGraphExtractor:
         with open(compile_commands) as f:
             compile_db = json.load(f)
 
+        self.include_dirs = _collect_include_dirs(compile_db, str(source))
+
         # Filter to relevant files using configurable patterns
         entries = []
-        skipped_excluded = 0
         for entry in compile_db:
             file_path = entry.get("file", "")
-
-            # Must be a C++ file
-            if not file_path.endswith(".cpp"):
-                continue
-
-            # Check inclusion based on directory patterns
-            if not should_include_dir(file_path, include_dirs):
-                continue
-
-            # Apply exclusion patterns (tests, third_party, etc.)
-            if should_exclude(file_path):
-                skipped_excluded += 1
-                continue
-
-            command = entry.get("command", "")
             directory = entry.get("directory", "")
-
-            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
-
             if not os.path.isabs(file_path) and directory:
                 file_path = os.path.join(directory, file_path)
 
+            tu_rel = _rel_to_root(file_path, str(source))
+            if tu_rel is None:
+                continue
+
+            if not file_path.endswith(".cpp"):
+                self.tu_status[tu_rel] = "unsupported_language"
+                continue
+            if not should_include_dir(file_path, include_dirs):
+                self.tu_status[tu_rel] = "filtered"
+                continue
+            if should_exclude(file_path):
+                self.tu_status[tu_rel] = "filtered"
+                continue
+
+            command = entry.get("command", "")
+            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
             entries.append((file_path, args))
 
+        filtered_count = sum(1 for s in self.tu_status.values() if s == "filtered")
         log.info(
             f"Filtered to {len(entries)} files "
-            f"(excluded {skipped_excluded} test/third_party)"
+            f"(excluded {filtered_count} test/third_party)"
         )
 
         log.info(f"Processing {len(entries)} C++ files with parallel libclang...")
 
-        # Determine number of workers
         if num_workers is None:
             num_workers = max(1, int(cpu_count() * 0.8))
-
         log.info(f"Using {num_workers} parallel workers")
 
-        # Process files in parallel
         with Pool(processes=num_workers) as pool:
             results = pool.map(_parse_single_file, entries)
 
@@ -236,9 +270,14 @@ class CppCallGraphExtractor:
         # Without this, inline defs in headers get duplicated once per TU.
         success_count = 0
         for result in results:
+            tu_rel = _rel_to_root(result.get("file", ""), str(source))
             if result["success"]:
                 success_count += 1
+                if tu_rel:
+                    self.tu_status[tu_rel] = "ok"
                 self._merge_parse_result(result, source_root=str(source))
+            elif tu_rel:
+                self.tu_status[tu_rel] = "parse_failed"
 
         self._rebuild_aggregates()
 
@@ -275,10 +314,14 @@ class CppCallGraphExtractor:
             "file_records": self.file_records,
             "tu_includes_paths": paths_list,
             "tu_includes_idx": tu_includes_idx,
+            "tu_status": dict(self.tu_status),
+            "include_dirs": list(self.include_dirs),
             "stats": {
                 "total_functions": len(self.function_locations),
                 "total_call_edges": sum(len(v) for v in self.callees.values()),
                 "files_processed": len(self.processed_files),
+                "coverage": self.coverage_summary(),
+                "include_dirs_count": len(self.include_dirs),
             },
         }
 
@@ -388,6 +431,7 @@ class CppCallGraphExtractor:
             self.file_records.pop(f, None)
             if source_root and (rel := _rel_to_root(f, source_root)):
                 self.tu_includes.pop(rel, None)
+                self.tu_status.pop(rel, None)
 
         for file, _ in entries:
             self.file_records.pop(file, None)
@@ -405,8 +449,17 @@ class CppCallGraphExtractor:
                 results = [_parse_single_file(e) for e in entries]
 
             for result in results:
+                rel = (
+                    _rel_to_root(result.get("file", ""), source_root)
+                    if source_root
+                    else None
+                )
                 if result["success"]:
+                    if rel:
+                        self.tu_status[rel] = "ok"
                     self._merge_parse_result(result, source_root=source_root)
+                elif rel:
+                    self.tu_status[rel] = "parse_failed"
 
         self._rebuild_aggregates()
 
@@ -444,6 +497,13 @@ class CppCallGraphExtractor:
         for v in self.tu_includes.values():
             result.update(v)
         return result
+
+    def coverage_summary(self) -> dict[str, int]:
+        """Count TUs per status bucket from tu_status."""
+        summary: dict[str, int] = defaultdict(int)
+        for status in self.tu_status.values():
+            summary[status] += 1
+        return dict(summary)
 
     def load_from_path(self, cache_path: Path) -> bool:
         """Load a call graph JSON from an arbitrary path (not in cache_dir)."""
@@ -628,4 +688,6 @@ class CppCallGraphExtractor:
             self.tu_includes = {
                 k: list(v) for k, v in (data.get("tu_includes") or {}).items()
             }
+        self.tu_status = dict(data.get("tu_status") or {})
+        self.include_dirs = list(data.get("include_dirs") or [])
         self.processed_files = set(self.file_records)

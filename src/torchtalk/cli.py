@@ -46,6 +46,30 @@ def cmd_init(args):
     )
 
 
+def _read_cache_stats(cache_path: Path) -> dict | None:
+    """Return the top-level 'stats' dict from a call-graph cache, or None."""
+    try:
+        with open(cache_path) as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return None
+    return data.get("stats") or None
+
+
+def _read_coverage_from_cache(cache_path: Path) -> dict[str, int] | None:
+    """Return the coverage summary from a call-graph cache, or None on failure."""
+    stats = _read_cache_stats(cache_path)
+    return (stats or {}).get("coverage") or None
+
+
+def _format_coverage(cov: dict[str, int]) -> str:
+    """Render coverage as 'N ok / M parse_failed / ...' in a stable order."""
+    order = ["ok", "parse_failed", "unsupported_language", "filtered"]
+    parts = [f"{cov[k]:,} {k}" for k in order if k in cov]
+    extras = [f"{v:,} {k}" for k, v in cov.items() if k not in order]
+    return " / ".join(parts + extras) if (parts or extras) else "unknown"
+
+
 def cmd_status(args):
     """Show TorchTalk configuration and cache status."""
     from datetime import datetime
@@ -119,6 +143,14 @@ def cmd_status(args):
                     f"  {label + ':':18s} {p.name} "
                     f"({size_mb:.1f} MB, {mtime:%Y-%m-%d %H:%M})"
                 )
+                if key == "callgraph":
+                    stats = _read_cache_stats(p) or {}
+                    cov = stats.get("coverage")
+                    if cov:
+                        lines.append(f"  {'TU coverage:':18s} " + _format_coverage(cov))
+                    idirs = stats.get("include_dirs_count")
+                    if isinstance(idirs, int) and idirs > 0:
+                        lines.append(f"  {'-I dirs tracked:':18s} {idirs}")
             else:
                 lines.append(f"  {label + ':':18s} not built")
     else:
@@ -194,7 +226,7 @@ def cmd_index_update(args):
         return 1
 
     try:
-        stats = update_index(source, since=args.since)
+        stats = update_index(source, since=args.since, on_uncovered=args.on_uncovered)
     except (SnapshotError, RuntimeError, ValueError) as e:
         log.error(str(e))
         return 1
@@ -214,10 +246,12 @@ def cmd_index_update(args):
         print(f"  C++ call graph:    skipped ({cg['skipped']})")
     else:
         affected = cg.get("header_affected_tus", 0)
+        widened = cg.get("widened_tus", 0)
+        extra = f", {widened} from widen" if widened else ""
         print(
             f"  C++ call graph:    "
             f"{cg.get('files_updated', 0)} updated "
-            f"({affected} from headers), "
+            f"({affected} from headers{extra}), "
             f"{cg.get('files_removed', 0)} removed, "
             f"{cg.get('total_functions', 0):,} functions total"
         )
@@ -225,19 +259,28 @@ def cmd_index_update(args):
     uncovered = cg.get("uncovered_headers", 0)
     if uncovered:
         sample = cg.get("uncovered_sample", [])
-        print(
-            f"\nWARNING: {uncovered} changed header(s) not in baseline coverage.\n"
-            "  Their affected TUs can't be resolved from the recorded include "
-            "graph. Likely causes:\n"
-            "  - baseline had parse failures on TUs that include them\n"
-            "  - generated headers added since baseline\n"
-            "  - truly unused headers (safe to ignore)\n"
-            "  Run 'torchtalk index build' for a clean rebuild if unsure."
-        )
+        policy = cg.get("on_uncovered", "warn")
+        if policy == "widen":
+            print(
+                f"\nNOTE: {uncovered} changed header(s) not in baseline coverage; "
+                f"widen policy added {cg.get('widened_tus', 0)} TU(s) to reparse."
+            )
+        else:
+            print(
+                f"\nWARNING: {uncovered} changed header(s) not in baseline coverage.\n"
+                "  Their affected TUs can't be resolved from the recorded include "
+                "graph. Likely causes:\n"
+                "  - baseline had parse failures on TUs that include them\n"
+                "  - generated headers added since baseline\n"
+                "  - truly unused headers (safe to ignore)\n"
+                "  Run 'torchtalk index build' for a clean rebuild if unsure."
+            )
         for h in sample:
             print(f"    {h}")
         if uncovered > len(sample):
             print(f"    ... and {uncovered - len(sample)} more")
+    if cg.get("uncovered_fail"):
+        return 1
     return 0
 
 
@@ -561,6 +604,16 @@ Example:
         "--pytorch-source",
         "-p",
         help="Override PyTorch source (default: from config)",
+    )
+    p_update.add_argument(
+        "--on-uncovered",
+        choices=["warn", "fail", "widen"],
+        default="warn",
+        help=(
+            "How to handle changed headers not in baseline's include graph: "
+            "warn (default), fail (non-zero exit), "
+            "widen (textually grep compile-DB TUs and add to reparse set)"
+        ),
     )
     p_update.set_defaults(func=cmd_index_update)
 

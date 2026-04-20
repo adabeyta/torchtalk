@@ -714,13 +714,17 @@ def _auto_detect_pytorch() -> str | None:
     return resolve_pytorch_source()
 
 
-def update_index(source: str, since: str) -> dict:
+def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
     """Incrementally refresh the bindings index using a prior snapshot as baseline.
 
     Re-detects only C++/CUDA files that changed in git between the snapshot's
     recorded commit and current HEAD. YAML files are re-parsed when they change.
     The C++ call graph is NOT incrementally updated and may be stale; run
     `torchtalk index build` to rebuild it.
+
+    `on_uncovered` selects the policy for changed headers not in the baseline's
+    recorded include graph: warn (default), fail (flag in stats), or widen
+    (textually grep compile-DB TUs and add to the reparse set).
     """
     import subprocess
     from dataclasses import asdict
@@ -835,7 +839,7 @@ def update_index(source: str, since: str) -> dict:
         json.dump(data, f)
 
     cg_stats = _update_call_graph(
-        source, since, changed_cpp, removed_cpp, changed_headers
+        source, since, changed_cpp, removed_cpp, changed_headers, on_uncovered
     )
 
     return {
@@ -851,12 +855,71 @@ def update_index(source: str, since: str) -> dict:
     }
 
 
+def _widen_reparse_set(
+    source: Path, uncovered: set[str], cc_index: dict[str, dict]
+) -> set[str]:
+    """Return repo-relative TUs that textually #include any uncovered header.
+
+    Basename match is deliberately conservative: a header `ops.h` matches every
+    `#include ".../ops.h"`, including unrelated same-named files. Over-reparsing
+    is preferable to missing a real edge under the `widen` policy.
+    """
+    import os
+    import re
+    import subprocess
+
+    compiled_rel: set[str] = set()
+    for fp in cc_index:
+        try:
+            rel = os.path.relpath(fp, str(source))
+        except ValueError:
+            continue
+        if not rel.startswith(".."):
+            compiled_rel.add(rel)
+
+    extra: set[str] = set()
+    for hdr in uncovered:
+        basename = os.path.basename(hdr)
+        if not basename:
+            continue
+        pattern = rf'^\s*#include\s*[<"][^<"]*{re.escape(basename)}[>"]'
+        try:
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(source),
+                    "grep",
+                    "-l",
+                    "-E",
+                    pattern,
+                    "--",
+                    "*.cpp",
+                    "*.cu",
+                    "*.mm",
+                    "*.cc",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=30,
+                check=False,
+            )
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            continue
+        for line in result.stdout.splitlines():
+            line = line.strip()
+            if line and line in compiled_rel:
+                extra.add(line)
+    return extra
+
+
 def _update_call_graph(
     source: str,
     since: str,
     changed_cpp: set[str],
     removed_cpp: set[str],
     changed_headers: set[str],
+    on_uncovered: str = "warn",
 ) -> dict[str, Any]:
     """Incrementally refresh the C++ call graph using a snapshot as baseline.
 
@@ -894,11 +957,11 @@ def _update_call_graph(
     if not compile_commands.exists():
         compile_commands = src / "build" / "compile_commands.json"
 
-    entries: list[tuple[str, list[str]]] = []
-    if compile_commands.exists() and tus_to_reparse:
+    cc_index: dict[str, dict] = {}
+    need_db = tus_to_reparse or (uncovered and on_uncovered == "widen")
+    if compile_commands.exists() and need_db:
         with open(compile_commands) as f:
             compile_db = json.load(f)
-        cc_index: dict[str, dict] = {}
         for entry in compile_db:
             fp = entry.get("file", "")
             directory = entry.get("directory", "")
@@ -906,14 +969,21 @@ def _update_call_graph(
                 fp = os.path.join(directory, fp)
             cc_index[fp] = entry
 
-        for rel in tus_to_reparse:
-            full = str(src / rel)
-            entry = cc_index.get(full)
-            if entry is None:
-                continue
-            command = entry.get("command", "")
-            args = command.split()[1:] if command else entry.get("arguments", [])[1:]
-            entries.append((full, args))
+    widened_net: set[str] = set()
+    if uncovered and on_uncovered == "widen" and cc_index:
+        widened = _widen_reparse_set(src, uncovered, cc_index)
+        widened_net = widened - tus_to_reparse
+        tus_to_reparse |= widened
+
+    entries: list[tuple[str, list[str]]] = []
+    for rel in tus_to_reparse:
+        full = str(src / rel)
+        entry = cc_index.get(full)
+        if entry is None:
+            continue
+        command = entry.get("command", "")
+        args = command.split()[1:] if command else entry.get("arguments", [])[1:]
+        entries.append((full, args))
 
     removed_abs = [str(src / r) for r in removed_cpp]
 
@@ -925,6 +995,11 @@ def _update_call_graph(
     stats["header_affected_tus"] = len(header_affected)
     stats["uncovered_headers"] = len(uncovered)
     stats["uncovered_sample"] = sorted(uncovered)[:5]
+    stats["on_uncovered"] = on_uncovered
+    if widened_net:
+        stats["widened_tus"] = len(widened_net)
+    if uncovered and on_uncovered == "fail":
+        stats["uncovered_fail"] = True
 
     extractor.save_cache(cache_key)
     return stats

@@ -162,3 +162,24 @@ def relative_path(full_path: str, base: str | None = None) -> str:
         if path.startswith(prefix):
             return path[len(prefix) :]
     return path
+
+
+def coverage_note(extractor) -> str:
+    """Return a one-line C++ TU coverage summary, or '' when empty."""
+    cov = extractor.coverage_summary()
+    if not cov:
+        return ""
+    ok = cov.get("ok", 0)
+    unsupported = cov.get("unsupported_language", 0)
+    parse_failed = cov.get("parse_failed", 0)
+    filtered = cov.get("filtered", 0)
+    total = ok + unsupported + parse_failed + filtered
+    if total == 0:
+        return ""
+    bits = []
+    if unsupported:
+        bits.append(f"{unsupported:,} CUDA/.mm/.cc")
+    if parse_failed:
+        bits.append(f"{parse_failed:,} parse-failed")
+    unindexed = f"; unindexed: {', '.join(bits)}" if bits else ""
+    return f"Coverage: {ok:,} of {total:,} C++ TUs indexed{unindexed}."
