@@ -10,6 +10,7 @@ from torchtalk.analysis import cpp_call_graph
 from torchtalk.analysis.cpp_call_graph import (
     LIBCLANG_AVAILABLE,
     CppCallGraphExtractor,
+    _translate_args,
 )
 
 pytestmark = pytest.mark.skipif(not LIBCLANG_AVAILABLE, reason="libclang not available")
@@ -30,6 +31,37 @@ def _seed(ext: CppCallGraphExtractor, records: dict[str, dict]) -> None:
         for path, rec in records.items()
     }
     ext._rebuild_aggregates()
+
+
+class TestTranslateArgs:
+    """Routing helper: pick C++ filter vs CUDA flag stack at entry-build time."""
+
+    def test_cpp_filters_to_minimal_args(self):
+        raw = ["-O2", "-Wall", "-I/foo", "-DBAR=1", "-std=c++17", "-fPIC"]
+        out = _translate_args("/x.cpp", raw, cuda_env=None)
+        assert out == ["-I/foo", "-DBAR=1", "-std=c++17"]
+
+    def test_cu_without_cuda_env_falls_back_to_cpp_filter(self):
+        raw = ["-O2", "-I/foo", "-DBAR=1", "-std=c++17"]
+        out = _translate_args("/x.cu", raw, cuda_env=None)
+        assert out == ["-I/foo", "-DBAR=1", "-std=c++17"]
+
+    def test_cu_with_cuda_env_emits_cuda_flag_stack(self):
+        env = {
+            "clang_resource_dir": "/r",
+            "cuda_path": "/cuda",
+            "gpu_arch": "sm_80",
+            "extra_isystem": ["/extra"],
+        }
+        out = _translate_args("/x.cu", ["-I/foo", "-O2"], cuda_env=env)
+        assert out[:2] == ["-x", "cuda"]
+        assert "--cuda-path=/cuda" in out
+        assert "--cuda-gpu-arch=sm_80" in out
+        assert "--cuda-host-only" in out
+        assert "-resource-dir=/r" in out
+        assert "-isystem" in out and "/extra" in out
+        assert "-I/foo" in out
+        assert "-O2" not in out
 
 
 class TestRebuildAggregates:

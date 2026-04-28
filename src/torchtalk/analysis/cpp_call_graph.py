@@ -68,6 +68,82 @@ def _collect_include_dirs(compile_db: list[dict], source_root: str) -> list[str]
     return sorted(dirs)
 
 
+def _discover_cuda_env() -> dict | None:
+    """Return CUDA parsing env dict, or None if libclang CUDA parsing unavailable."""
+    import subprocess
+
+    try:
+        resource = subprocess.run(
+            ["clang", "-print-resource-dir"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    except (
+        FileNotFoundError,
+        subprocess.CalledProcessError,
+        subprocess.TimeoutExpired,
+    ):
+        return None
+    if not resource or not os.path.isdir(resource):
+        return None
+
+    cuda_path = os.environ.get("CUDA_HOME") or "/usr/local/cuda"
+    if not os.path.isfile(os.path.join(cuda_path, "include", "cuda_runtime.h")):
+        return None
+
+    extra_isystem: list[str] = []
+    import glob
+
+    for pattern in (
+        "/usr/local/lib/python*/dist-packages/nvidia/cuda_runtime/include",
+        "/usr/lib/python*/dist-packages/nvidia/cuda_runtime/include",
+    ):
+        for p in glob.glob(pattern):
+            if os.path.isdir(p):
+                extra_isystem.append(p)
+                break
+        if extra_isystem:
+            break
+
+    cccl = os.path.join(cuda_path, "include", "cccl")
+    if os.path.isdir(cccl):
+        extra_isystem.append(cccl)
+
+    return {
+        "clang_resource_dir": resource,
+        "cuda_path": cuda_path,
+        "gpu_arch": os.environ.get("TORCHTALK_CUDA_ARCH", "sm_80"),
+        "extra_isystem": extra_isystem,
+    }
+
+
+def _cu_args(compile_args: list[str], cuda_env: dict) -> list[str]:
+    """Translate an nvcc compile-command tail into libclang CUDA args."""
+    keep = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+    out = [
+        "-x",
+        "cuda",
+        f"--cuda-path={cuda_env['cuda_path']}",
+        f"--cuda-gpu-arch={cuda_env['gpu_arch']}",
+        "--cuda-host-only",
+        f"-resource-dir={cuda_env['clang_resource_dir']}",
+    ]
+    for inc in cuda_env.get("extra_isystem", []):
+        out.extend(["-isystem", inc])
+    return out + keep
+
+
+def _translate_args(
+    file_path: str, compile_args: list[str], cuda_env: dict | None
+) -> list[str]:
+    """Pick the libclang arg set for a TU based on extension and CUDA availability."""
+    if file_path.endswith(".cu") and cuda_env:
+        return _cu_args(compile_args, cuda_env)
+    return [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
+
+
 def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
     """Parse a single file and extract call graph data (runs in subprocess)."""
     file_path, compile_args = args
@@ -85,9 +161,8 @@ def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
         from clang.cindex import CursorKind, Index, TranslationUnit
 
         index = Index.create()
-        filtered_args = [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
         tu = index.parse(
-            file_path, args=filtered_args, options=TranslationUnit.PARSE_INCOMPLETE
+            file_path, args=compile_args, options=TranslationUnit.PARSE_INCOMPLETE
         )
 
         if tu is None:
@@ -224,6 +299,9 @@ class CppCallGraphExtractor:
 
         self.include_dirs = _collect_include_dirs(compile_db, str(source))
 
+        cuda_env = _discover_cuda_env()
+        supported_exts = (".cpp", ".cu") if cuda_env else (".cpp",)
+
         # Filter to relevant files using configurable patterns
         entries = []
         for entry in compile_db:
@@ -236,7 +314,7 @@ class CppCallGraphExtractor:
             if tu_rel is None:
                 continue
 
-            if not file_path.endswith(".cpp"):
+            if not file_path.endswith(supported_exts):
                 self.tu_status[tu_rel] = "unsupported_language"
                 continue
             if not should_include_dir(file_path, include_dirs):
@@ -248,7 +326,7 @@ class CppCallGraphExtractor:
 
             command = entry.get("command", "")
             args = command.split()[1:] if command else entry.get("arguments", [])[1:]
-            entries.append((file_path, args))
+            entries.append((file_path, _translate_args(file_path, args, cuda_env)))
 
         filtered_count = sum(1 for s in self.tu_status.values() if s == "filtered")
         log.info(
@@ -440,13 +518,15 @@ class CppCallGraphExtractor:
 
         results: list[dict[str, Any]] = []
         if entries:
+            cuda_env = _discover_cuda_env()
+            translated = [(fp, _translate_args(fp, a, cuda_env)) for fp, a in entries]
             if num_workers is None:
                 num_workers = max(1, int(cpu_count() * 0.8))
-            if len(entries) > 1 and num_workers > 1:
+            if len(translated) > 1 and num_workers > 1:
                 with Pool(processes=num_workers) as pool:
-                    results = pool.map(_parse_single_file, entries)
+                    results = pool.map(_parse_single_file, translated)
             else:
-                results = [_parse_single_file(e) for e in entries]
+                results = [_parse_single_file(e) for e in translated]
 
             for result in results:
                 rel = (
