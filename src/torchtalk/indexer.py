@@ -53,6 +53,7 @@ class ServerState:
     test_functions: dict[str, list[dict]] = field(default_factory=dict)
     test_utilities: dict[str, dict] = field(default_factory=dict)
     opinfo_registry: dict[str, dict] = field(default_factory=dict)
+    opinfo_alias_map: dict[str, list[dict]] = field(default_factory=dict)
     opinfo_test_files: set[str] = field(default_factory=set)
     test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
     binding_bridge: dict[str, dict] = field(default_factory=dict)
@@ -804,24 +805,55 @@ def _get_ast_name(node) -> str:
     return ""
 
 
+_OPINFO_CLASSES = {"OpInfo", "BinaryUfuncInfo", "UnaryUfuncInfo", "ShapeFuncInfo"}
+
+
+def _is_opinfo_call(node) -> bool:
+    """True if `node` is an `OpInfo(...)` / `BinaryUfuncInfo(...)` / etc. call."""
+    if not isinstance(node, ast.Call):
+        return False
+    func = node.func
+    if isinstance(func, ast.Name):
+        return func.id in _OPINFO_CLASSES
+    if isinstance(func, ast.Attribute):
+        return func.attr in _OPINFO_CLASSES
+    return False
+
+
+def _opinfo_string_kw(node, kwarg: str) -> str | None:
+    """Extract a string kwarg from an OpInfo call, e.g. `aten_name='conv2d'`."""
+    for kw in node.keywords:
+        if kw.arg == kwarg and isinstance(kw.value, ast.Constant):
+            v = kw.value.value
+            if isinstance(v, str):
+                return v
+    return None
+
+
+def _opinfo_string_tuple_kw(node, kwarg: str) -> list[str]:
+    """Extract a string tuple/list kwarg, e.g. `aliases=('conv2d', 'conv2d_v2')`."""
+    out: list[str] = []
+    for kw in node.keywords:
+        if kw.arg != kwarg or not isinstance(kw.value, (ast.Tuple, ast.List)):
+            continue
+        for elt in kw.value.elts:
+            if isinstance(elt, ast.Constant) and isinstance(elt.value, str):
+                out.append(elt.value)
+    return out
+
+
 def _parse_opinfo_registry(opinfo_path: str):
-    """Parse OpInfo definitions to map operators to their test info."""
+    """Parse OpInfo definitions for op name + aliases + aten_name."""
     global _state
 
     try:
         path = Path(opinfo_path)
         content = path.read_text()
+        try:
+            tree = ast.parse(content, filename=opinfo_path)
+        except SyntaxError:
+            return
 
-        # Match OpInfo and its sibling constructors (BinaryUfuncInfo,
-        # UnaryUfuncInfo, ShapeFuncInfo) — all use the same first-arg shape.
-        import re
-
-        pattern = (
-            r"\b(?:OpInfo|BinaryUfuncInfo|UnaryUfuncInfo|ShapeFuncInfo)"
-            r"\s*\(\s*['\"]([^'\"]+)['\"]"
-        )
-
-        # Get relative path for display
         if _state.pytorch_source:
             try:
                 rel_path = str(path.relative_to(_state.pytorch_source))
@@ -831,21 +863,37 @@ def _parse_opinfo_registry(opinfo_path: str):
             rel_path = str(path)
 
         count = 0
-        for match in re.finditer(pattern, content):
-            op_name = match.group(1)
-            line = content[: match.start()].count("\n") + 1
-            _state.opinfo_registry[op_name] = {
+        for node in ast.walk(tree):
+            if not _is_opinfo_call(node):
+                continue
+            if not node.args or not isinstance(node.args[0], ast.Constant):
+                continue
+            op_name = node.args[0].value
+            if not isinstance(op_name, str):
+                continue
+
+            aliases = _opinfo_string_tuple_kw(node, "aliases")
+            aten_name = _opinfo_string_kw(node, "aten_name")
+
+            entry = {
                 "name": op_name,
                 "file": rel_path,
-                "line": line,
+                "line": node.lineno,
+                "aliases": aliases,
+                "aten_name": aten_name,
             }
+            _state.opinfo_registry[op_name] = entry
+            for alias in aliases:
+                _state.opinfo_alias_map.setdefault(alias, []).append(entry)
+            if aten_name:
+                _state.opinfo_alias_map.setdefault(aten_name, []).append(entry)
             count += 1
 
         if count > 0:
             log.debug(f"Found {count} OpInfo definitions in {path.name}")
 
-    except Exception as e:
-        log.debug(f"Failed to parse OpInfo from {opinfo_path}: {e}")
+    except OSError as e:
+        log.debug(f"Failed to read OpInfo file {opinfo_path}: {e}")
 
 
 def _auto_detect_pytorch() -> str | None:

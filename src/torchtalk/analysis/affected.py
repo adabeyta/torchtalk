@@ -159,6 +159,7 @@ def affected_tests(
     test_classes: dict[str, list[dict]],
     test_files: dict[str, dict],
     opinfo_registry: dict[str, dict] | None = None,
+    opinfo_alias_map: dict[str, list[dict]] | None = None,
     opinfo_test_files: set[str] | None = None,
     test_attr_index: dict[str, list[dict]] | None = None,
     depth: int = 3,
@@ -176,9 +177,9 @@ def affected_tests(
         ).items():
             by_file.setdefault(path, set()).update(classes)
 
-    # If any API is OpInfo-tested, every @ops(op_db) test file becomes
-    # relevant — empty class set means "run the whole file."
-    if opinfo_registry and opinfo_test_files and apis & opinfo_registry.keys():
+    # An API matches OpInfo directly OR via an `aliases=`/`aten_name=` link.
+    opinfo_keys: set[str] = set(opinfo_registry or {}) | set(opinfo_alias_map or {})
+    if opinfo_test_files and apis & opinfo_keys:
         for path in opinfo_test_files:
             by_file.setdefault(path, set())
 

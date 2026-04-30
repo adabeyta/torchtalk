@@ -289,6 +289,37 @@ class TestInferLocalTypes:
         assert types == {}
 
 
+class TestParseOpInfoRegistry:
+    def test_extracts_name_aliases_aten_name(self, tmp_path, monkeypatch):
+        # Reset state
+        from torchtalk.indexer import _state
+
+        _state.opinfo_registry = {}
+        _state.opinfo_alias_map = {}
+        _state.pytorch_source = str(tmp_path)
+
+        opinfo_file = tmp_path / "opinfos.py"
+        opinfo_file.write_text(
+            "OpInfo('nn.functional.conv2d',\n"
+            "       aliases=('conv2d',),\n"
+            "       aten_name='conv2d')\n"
+            "BinaryUfuncInfo('add',\n"
+            "                aten_name='add')\n"
+        )
+        indexer._parse_opinfo_registry(str(opinfo_file))
+
+        assert "nn.functional.conv2d" in _state.opinfo_registry
+        entry = _state.opinfo_registry["nn.functional.conv2d"]
+        assert entry["aliases"] == ["conv2d"]
+        assert entry["aten_name"] == "conv2d"
+
+        assert "add" in _state.opinfo_registry
+        # Both aliases and aten_name register into alias_map
+        assert "conv2d" in _state.opinfo_alias_map
+        assert _state.opinfo_alias_map["conv2d"][0]["name"] == "nn.functional.conv2d"
+        assert "add" in _state.opinfo_alias_map
+
+
 class TestCollectTestAttrHits:
     def _walk(self, code: str, interesting: set[str]):
         tree = ast.parse(code)

@@ -188,6 +188,30 @@ class TestAffectedTests:
         )
         assert result["test_runs"] == []
 
+    def test_opinfo_alias_match_expands_files(self, extractor):
+        # API "conv2d" not in opinfo_registry directly, but is in alias_map
+        # because OpInfo("nn.functional.conv2d", aliases=("conv2d",)).
+        by_cpp_name = {"foo_kernel": [{"python_name": "aten.conv2d"}]}
+        opinfo_registry = {"nn.functional.conv2d": {"name": "nn.functional.conv2d"}}
+        opinfo_alias_map = {
+            "conv2d": [{"name": "nn.functional.conv2d"}],
+        }
+        opinfo_test_files = {"test/test_ops.py", "test/test_meta.py"}
+
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={"test/test_ops.py": {}, "test/test_meta.py": {}},
+            opinfo_registry=opinfo_registry,
+            opinfo_alias_map=opinfo_alias_map,
+            opinfo_test_files=opinfo_test_files,
+            depth=1,
+        )
+        files = {tr["file"] for tr in result["test_runs"]}
+        assert files == {"test/test_ops.py", "test/test_meta.py"}
+
 
 class TestApiAttrVariants:
     def test_includes_self_and_in_place_pair(self):
