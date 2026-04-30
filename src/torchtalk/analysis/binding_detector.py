@@ -81,6 +81,30 @@ class BindingGraph:
         self.cuda_kernels.append(kernel)
 
 
+_IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
+
+
+def _clean_impl_target(raw: str) -> str:
+    """Strip TORCH_FN/TORCH_FN_BOXED wrappers, leading `&`, and namespaces.
+
+    `m.impl("op", TORCH_FN(at::native::op))` → `op`. Without this the cpp_name
+    becomes `TORCH_FN(at::native::op` and never matches the call graph.
+    """
+    raw = raw.strip()
+    for wrapper in _IMPL_WRAPPERS:
+        prefix = wrapper + "("
+        if raw.startswith(prefix):
+            raw = raw[len(prefix) :]
+            if raw.endswith(")"):
+                raw = raw[:-1]
+            raw = raw.strip()
+            break
+    raw = raw.lstrip("&").strip()
+    if "::" in raw:
+        raw = raw.rsplit("::", 1)[-1]
+    return raw
+
+
 class BindingDetector:
     """Detects pybind11, TORCH_LIBRARY, and CUDA binding patterns."""
 
@@ -405,11 +429,15 @@ class BindingDetector:
                     )
                     graph.add_binding(binding)
 
-        # m.impl("op_name", function_ptr)
-        impl_pattern = r'm\.impl\s*\(\s*"([^"]+)"\s*,\s*([^\s,)]+)'
+        # m.impl("op_name", function_ptr) — function_ptr may be wrapped in
+        # TORCH_FN(...), TORCH_FN_BOXED(...), prefixed with `&`, or namespaced
+        # (`at::native::foo`). Capture the full target then strip wrappers.
+        impl_pattern = r'm\.impl\s*\(\s*"([^"]+)"\s*,\s*([^,;]+?)\s*(?:[,)]|;)'
         for match in re.finditer(impl_pattern, block_content):
             op_name = match.group(1)
-            cpp_func = match.group(2)
+            cpp_func = _clean_impl_target(match.group(2))
+            if not cpp_func:
+                continue
             line_offset = block_content[: match.start()].count("\n")
 
             binding = Binding(

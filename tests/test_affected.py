@@ -10,11 +10,11 @@ import pytest
 from torchtalk.analysis.affected import (
     _api_to_source_paths,
     _class_matches_api,
-    _normalize_api,
     _tests_mentioning_apis,
     _tests_via_profiling,
     affected_tests,
     api_attr_variants,
+    normalize_api,
     symbols_in_file,
 )
 from torchtalk.tools.affected import _do_affected
@@ -22,25 +22,25 @@ from torchtalk.tools.affected import _do_affected
 
 class TestNormalizeApi:
     def test_bare_name(self):
-        assert _normalize_api("copy_") == "copy_"
-        assert _normalize_api("trace") == "trace"
+        assert normalize_api("copy_") == "copy_"
+        assert normalize_api("trace") == "trace"
 
     def test_strips_namespace(self):
-        assert _normalize_api("aten.zero_") == "zero_"
-        assert _normalize_api("aten.get_gradients") == "get_gradients"
+        assert normalize_api("aten.zero_") == "zero_"
+        assert normalize_api("aten.get_gradients") == "get_gradients"
 
     def test_drops_uppercase_overload_tag(self):
-        assert _normalize_api("aten.fill_.Scalar") == "fill_"
-        assert _normalize_api("aten.sum.dim_IntList") == "sum"
+        assert normalize_api("aten.fill_.Scalar") == "fill_"
+        assert normalize_api("aten.sum.dim_IntList") == "sum"
 
     def test_drops_lowercase_literal_overload_tag(self):
-        assert _normalize_api("aten.size.int") == "size"
-        assert _normalize_api("aten.foo.default") == "foo"
+        assert normalize_api("aten.size.int") == "size"
+        assert normalize_api("aten.foo.default") == "foo"
 
     def test_preserves_lowercase_subnamespace(self):
         # masked.sum is a sub-namespace, not an overload — keep it.
-        assert _normalize_api("aten.masked.sum") == "masked.sum"
-        assert _normalize_api("aten.special.zeta") == "special.zeta"
+        assert normalize_api("aten.masked.sum") == "masked.sum"
+        assert normalize_api("aten.special.zeta") == "special.zeta"
 
 
 class TestClassMatchesApi:

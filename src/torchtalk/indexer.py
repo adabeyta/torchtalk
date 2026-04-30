@@ -327,7 +327,10 @@ def _build_index(source: str) -> dict[str, Any]:
 
 
 def _build_indexes(state: ServerState):
-    """Build lookup indexes."""
+    """Build lookup indexes. Clears prior contents so reloads don't duplicate."""
+    state.by_python_name.clear()
+    state.by_cpp_name.clear()
+    state.by_dispatch_key.clear()
     for binding in state.bindings:
         if py_name := binding.get("python_name"):
             state.by_python_name.setdefault(py_name, []).append(binding)

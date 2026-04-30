@@ -186,9 +186,12 @@ async def _do_list_test_utils(category: str = "all") -> str:
 
     md.h3("Core Utilities")
     for path, info in utility_info.items():
-        exists = (
-            path in _state.test_utilities or Path(_state.pytorch_source or "") / path
-        )
+        if path in _state.test_utilities:
+            exists = True
+        elif _state.pytorch_source:
+            exists = (Path(_state.pytorch_source) / path).exists()
+        else:
+            exists = False
         status = "✓" if exists else "?"
         md.item(f"**{info['name']}** {status}")
         md.item(f"*{info['description']}*", 1)

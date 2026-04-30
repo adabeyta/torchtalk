@@ -35,9 +35,6 @@ def normalize_api(python_name: str) -> str:
     return ".".join(rest)
 
 
-_normalize_api = normalize_api  # internal alias used by helpers below
-
-
 def _class_matches_api(class_name: str, api: str) -> bool:
     """Match `Test<Api>` or `Test<Api><Word>` in PascalCase class names.
 
@@ -92,7 +89,7 @@ def _bindings_for(
         for binding in candidates:
             matched.append(binding)
             if py_name := binding.get("python_name"):
-                apis.add(_normalize_api(py_name))
+                apis.add(normalize_api(py_name))
     return matched, apis
 
 
@@ -125,8 +122,6 @@ def api_attr_variants(api: str) -> set[str]:
     variants = {api, base, leaf, leaf + "_"}
     return {v for v in variants if v}
 
-
-_api_attr_variants = api_attr_variants  # internal alias
 
 # Receivers known to NOT be torch types — drop their hits (`dict.copy()`,
 # `list.copy()`, etc.). Unknown receivers (None) pass through as conservative.
@@ -176,7 +171,7 @@ def _tests_mentioning_apis(
     """Map test file → classes whose `test_*` methods reference any of `apis`."""
     by_file: dict[str, set[str]] = {}
     for api in apis:
-        for variant in _api_attr_variants(api):
+        for variant in api_attr_variants(api):
             for hit in test_attr_index.get(variant, []):
                 if hit["file"] not in test_files:
                     continue
