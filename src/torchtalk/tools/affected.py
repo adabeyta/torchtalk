@@ -27,6 +27,7 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
         opinfo_test_files=_state.opinfo_test_files,
         test_attr_index=_state.test_attr_index,
         python_profiling=_state.python_profiling or None,
+        decomp_alias_map=_state.decomp_alias_map or None,
         depth=depth,
     )
 

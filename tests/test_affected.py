@@ -216,6 +216,62 @@ class TestAffectedTests:
         files = {tr["file"] for tr in result["test_runs"]}
         assert files == {"test/test_ops.py", "test/test_meta.py"}
 
+    def test_decomp_alias_expansion_reaches_user_facing_test_class(self, extractor):
+        # Binding lands on `convolution_overrideable` (no TestConvolutionOverrideable
+        # in PyTorch). decomp_alias_map bridges to `conv2d`, which DOES have a
+        # test class. Without the bridge, no test_runs would be produced.
+        by_cpp_name = {
+            "foo_kernel": [
+                {"python_name": "aten.convolution_overrideable", "cpp_name": "foo"}
+            ]
+        }
+        test_classes = {
+            "TestConv2d": [
+                {"file": "test/test_nn.py", "is_test_class": True, "line": 1},
+            ],
+        }
+        test_files = {"test/test_nn.py": {}}
+        decomp_alias_map = {
+            "convolution_overrideable": ["conv2d"],
+            "conv2d": ["convolution_overrideable"],
+        }
+
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes=test_classes,
+            test_files=test_files,
+            decomp_alias_map=decomp_alias_map,
+            depth=1,
+        )
+        assert "conv2d" in result["python_apis"]
+        assert "convolution_overrideable" in result["python_apis"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_nn.py"}
+
+    def test_no_decomp_alias_map_leaves_apis_untouched(self, extractor):
+        # Same setup, but without decomp_alias_map: no expansion, no test runs.
+        by_cpp_name = {
+            "foo_kernel": [
+                {"python_name": "aten.convolution_overrideable", "cpp_name": "foo"}
+            ]
+        }
+        test_classes = {
+            "TestConv2d": [
+                {"file": "test/test_nn.py", "is_test_class": True, "line": 1},
+            ],
+        }
+        result = affected_tests(
+            funcs=["foo_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes=test_classes,
+            test_files={"test/test_nn.py": {}},
+            depth=1,
+        )
+        assert result["python_apis"] == ["convolution_overrideable"]
+        assert result["test_runs"] == []
+
 
 class TestApiAttrVariants:
     def test_includes_self_and_in_place_pair(self):

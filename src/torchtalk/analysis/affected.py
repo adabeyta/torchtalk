@@ -193,11 +193,22 @@ def affected_tests(
     opinfo_test_files: set[str] | None = None,
     test_attr_index: dict[str, list[dict]] | None = None,
     python_profiling: dict[str, dict[str, float]] | None = None,
+    decomp_alias_map: dict[str, list[str]] | None = None,
     depth: int = 3,
 ) -> dict[str, Any]:
     """Walk callers, derive Python APIs, return PyTorch-TestRun-shaped runs."""
     walked = _walk_callers(cpp_extractor, funcs, depth)
     bindings, apis = _bindings_for(walked, by_cpp_name)
+
+    # Bridge internal aten names to user-facing python ops via the decomp/refs
+    # registry (e.g. convolution_overrideable → conv2d) so downstream lookups
+    # find the test classes / OpInfo entries that actually exist.
+    if decomp_alias_map:
+        expanded: set[str] = set()
+        for api in apis:
+            expanded.update(decomp_alias_map.get(api, ()))
+        apis |= expanded
+
     by_file = _tests_for_apis(apis, test_classes, test_files)
 
     # Symbol-mention catch generic-class tests (TestTorch::test_sizes) that

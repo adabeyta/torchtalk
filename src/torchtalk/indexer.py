@@ -58,6 +58,7 @@ class ServerState:
     test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
     binding_bridge: dict[str, dict] = field(default_factory=dict)
     python_profiling: dict[str, dict[str, float]] = field(default_factory=dict)
+    decomp_alias_map: dict[str, list[str]] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -512,6 +513,7 @@ def _init_from_source(source: str):
 
     _state.pytorch_source = str(src)
     _init_binding_bridge(str(src))
+    _init_decomp_aliases(str(src))
     _init_cpp_call_graph(str(src))
     _init_python_modules(str(src))
     _init_test_infrastructure(str(src))
@@ -523,6 +525,14 @@ def _init_binding_bridge(source: str):
 
     _state.binding_bridge = build_binding_bridge(source, _state.native_functions)
     log.info(f"Binding bridge: {len(_state.binding_bridge)} qualnames")
+
+
+def _init_decomp_aliases(source: str):
+    """Build aten ↔ python-fn alias map from decomp/refs decorators."""
+    from .analysis.decomp_aliases import extract_decomp_aliases
+
+    _state.decomp_alias_map = extract_decomp_aliases(Path(source))
+    log.info(f"Decomp aliases: {len(_state.decomp_alias_map)} entries")
 
 
 def load_python_profiling(path: str) -> int:
