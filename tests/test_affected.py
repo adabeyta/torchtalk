@@ -249,6 +249,54 @@ class TestAffectedTests:
         assert "convolution_overrideable" in result["python_apis"]
         assert {tr["file"] for tr in result["test_runs"]} == {"test/test_nn.py"}
 
+    def test_backward_bridge_expands_to_forward_op(self, extractor):
+        # Walked C++ func is a backward kernel; bridge maps it to the forward
+        # op so the forward's TestCase gets pulled in.
+        by_cpp_name = {
+            "sigmoid_backward": [
+                {"python_name": "aten.sigmoid_backward", "cpp_name": "sigmoid_backward"}
+            ]
+        }
+        test_classes = {
+            "TestSigmoid": [
+                {"file": "test/test_unary.py", "is_test_class": True, "line": 1}
+            ],
+        }
+        backward_to_forward = {"sigmoid_backward": ["sigmoid"]}
+
+        result = affected_tests(
+            funcs=["at::native::sigmoid_backward"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes=test_classes,
+            test_files={"test/test_unary.py": {}},
+            backward_to_forward=backward_to_forward,
+            depth=1,
+        )
+        assert "sigmoid" in result["python_apis"]
+        assert "sigmoid_backward" in result["python_apis"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_unary.py"}
+
+    def test_kernel_impl_to_op_fallback_resolves_api(self, extractor):
+        # Walked C++ func is a kernel impl name; no binding, no native_function
+        # entry, but the dispatch stub map links it back to the ATen op.
+        kernel_impl_to_op = {"softmax_lastdim_kernel_impl": "softmax"}
+        result = affected_tests(
+            funcs=["at::native::softmax_lastdim_kernel_impl"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={
+                "TestSoftmax": [
+                    {"file": "test/test_nn.py", "is_test_class": True, "line": 1}
+                ]
+            },
+            test_files={"test/test_nn.py": {}},
+            kernel_impl_to_op=kernel_impl_to_op,
+            depth=1,
+        )
+        assert "softmax" in result["python_apis"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_nn.py"}
+
     def test_native_implementations_fallback_resolves_api(self, extractor):
         # Walked C++ func has NO matching binding (e.g. fallthrough cases where
         # cpp_name is a no-impl marker), but native_implementations confirms
@@ -365,6 +413,31 @@ class TestTestsMentioningApis:
         test_files = {"test/test_torch.py": {}}
         result = _tests_mentioning_apis({"size"}, attr_index, test_files)
         assert result == {"test/test_torch.py": {"TestTorch"}}
+
+    def test_drops_api_when_over_cap(self):
+        # Generic API matches 5 distinct (file, class) hits — cap of 3 drops it.
+        attr_index = {
+            "add": [
+                {"file": f"test/f{i}.py", "class": f"TestF{i}", "function": "t"}
+                for i in range(5)
+            ],
+        }
+        test_files = {f"test/f{i}.py": {} for i in range(5)}
+        result = _tests_mentioning_apis({"add"}, attr_index, test_files, per_api_cap=3)
+        assert result == {}
+
+    def test_keeps_api_at_or_under_cap(self):
+        attr_index = {
+            "rare_op": [
+                {"file": f"test/f{i}.py", "class": f"TestF{i}", "function": "t"}
+                for i in range(3)
+            ],
+        }
+        test_files = {f"test/f{i}.py": {} for i in range(3)}
+        result = _tests_mentioning_apis(
+            {"rare_op"}, attr_index, test_files, per_api_cap=3
+        )
+        assert len(result) == 3
 
     def test_uses_api_variants(self):
         # An API named "copy_" should match attrs recorded as "copy" too.

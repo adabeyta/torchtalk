@@ -59,6 +59,8 @@ class ServerState:
     binding_bridge: dict[str, dict] = field(default_factory=dict)
     python_profiling: dict[str, dict[str, float]] = field(default_factory=dict)
     decomp_alias_map: dict[str, list[str]] = field(default_factory=dict)
+    backward_to_forward: dict[str, list[str]] = field(default_factory=dict)
+    kernel_impl_to_op: dict[str, str] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -514,6 +516,8 @@ def _init_from_source(source: str):
     _state.pytorch_source = str(src)
     _init_binding_bridge(str(src))
     _init_decomp_aliases(str(src))
+    _init_backward_bridge()
+    _init_dispatch_stubs(str(src))
     _init_cpp_call_graph(str(src))
     _init_python_modules(str(src))
     _init_test_infrastructure(str(src))
@@ -535,6 +539,24 @@ def _init_decomp_aliases(source: str):
     log.info(f"Decomp aliases: {len(_state.decomp_alias_map)} entries")
 
 
+def _init_backward_bridge():
+    """Build backward → forward op map by scanning derivatives.yaml formulas."""
+    from .analysis.backward_bridge import extract_backward_to_forward
+
+    _state.backward_to_forward = extract_backward_to_forward(_state.derivatives)
+    log.info(f"Backward bridge: {len(_state.backward_to_forward)} entries")
+
+
+def _init_dispatch_stubs(source: str):
+    """Build kernel-impl → ATen op map from REGISTER_DISPATCH macros."""
+    from .analysis.dispatch_stub_map import extract_kernel_impl_to_op
+
+    _state.kernel_impl_to_op = extract_kernel_impl_to_op(
+        Path(source), _state.native_functions
+    )
+    log.info(f"Dispatch stub map: {len(_state.kernel_impl_to_op)} kernel impls")
+
+
 def load_python_profiling(path: str) -> int:
     """Load PyTorch's `td_heuristic_profiling.json` into state. Returns entry count.
 
@@ -546,9 +568,60 @@ def load_python_profiling(path: str) -> int:
     return len(data)
 
 
+_TEST_INFRA_CACHE_VERSION = 1
+
+
+def _save_test_infra_cache(path: Path) -> None:
+    """Persist test infrastructure state to JSON. Sets become sorted lists."""
+    payload = {
+        "version": _TEST_INFRA_CACHE_VERSION,
+        "fingerprint": _source_fingerprint(_state.pytorch_source or ""),
+        "test_files": _state.test_files,
+        "test_classes": _state.test_classes,
+        "test_functions": _state.test_functions,
+        "test_utilities": _state.test_utilities,
+        "opinfo_registry": _state.opinfo_registry,
+        "opinfo_alias_map": _state.opinfo_alias_map,
+        "opinfo_test_files": sorted(_state.opinfo_test_files),
+        "test_attr_index": _state.test_attr_index,
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+
+
+def _load_test_infra_cache(path: Path, source: str) -> bool:
+    """Hydrate state from a test-infra cache file. Returns True on success."""
+    try:
+        payload = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    if payload.get("version") != _TEST_INFRA_CACHE_VERSION:
+        return False
+    if payload.get("fingerprint") != _source_fingerprint(source):
+        return False
+    _state.test_files = payload["test_files"]
+    _state.test_classes = payload["test_classes"]
+    _state.test_functions = payload["test_functions"]
+    _state.test_utilities = payload["test_utilities"]
+    _state.opinfo_registry = payload["opinfo_registry"]
+    _state.opinfo_alias_map = payload["opinfo_alias_map"]
+    _state.opinfo_test_files = set(payload["opinfo_test_files"])
+    _state.test_attr_index = payload["test_attr_index"]
+    return True
+
+
 def _init_test_infrastructure(source: str):
-    """Initialize test infrastructure analysis."""
+    """Initialize test infrastructure analysis (cache-first)."""
     global _state
+
+    cache = cache_paths(source)["test_infra"]
+    if cache.exists() and _load_test_infra_cache(cache, source):
+        log.info(
+            f"Test infrastructure (cached): {len(_state.test_files)} files, "
+            f"{len(_state.test_classes)} test classes, "
+            f"{len(_state.test_functions)} test functions"
+        )
+        return
 
     try:
         import ast
@@ -710,6 +783,10 @@ def _init_test_infrastructure(source: str):
             f"{len(_state.test_classes)} test classes, "
             f"{len(_state.test_functions)} test functions"
         )
+        try:
+            _save_test_infra_cache(cache)
+        except OSError as e:
+            log.debug(f"Failed to save test infra cache: {e}")
 
     except Exception as e:
         log.warning(f"Failed to analyze test infrastructure: {e}")

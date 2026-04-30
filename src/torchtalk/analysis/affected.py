@@ -82,6 +82,7 @@ def _bindings_for(
     by_cpp_name: dict[str, list[dict]],
     native_functions: dict[str, dict] | None = None,
     native_implementations: dict[str, list[dict]] | None = None,
+    kernel_impl_to_op: dict[str, str] | None = None,
 ) -> tuple[list[dict], set[str]]:
     matched: list[dict] = []
     apis: set[str] = set()
@@ -94,19 +95,23 @@ def _bindings_for(
             matched.append(binding)
             if py_name := binding.get("python_name"):
                 apis.add(normalize_api(py_name))
-        # native_functions.yaml resolution: when no binding has cpp_name == bare,
-        # the bare symbol may itself be the ATen op name (the implicit-dispatch
-        # rule + structured/composite kernels). Use native_functions /
-        # native_implementations as the source of truth.
-        if not candidates:
-            base = bare.rstrip("_")
-            base = base[:-4] if base.endswith("_out") else base
-            for key in (bare, base):
-                if (native_implementations and key in native_implementations) or (
-                    native_functions and key in native_functions
-                ):
-                    apis.add(key)
-                    break
+        if candidates:
+            continue
+        # Fallback A: bare symbol is itself an ATen op name (implicit-dispatch
+        # rule + structured/composite kernels).
+        base = bare.rstrip("_")
+        base = base[:-4] if base.endswith("_out") else base
+        for key in (bare, base):
+            if (native_implementations and key in native_implementations) or (
+                native_functions and key in native_functions
+            ):
+                apis.add(key)
+                break
+        else:
+            # Fallback B: bare symbol is a CPU/CUDA kernel impl registered via
+            # REGISTER_DISPATCH(stub, &kernel) — resolve via stub-to-op map.
+            if kernel_impl_to_op and (op := kernel_impl_to_op.get(bare)):
+                apis.add(op)
     return matched, apis
 
 
@@ -184,10 +189,18 @@ def _tests_mentioning_apis(
     apis: set[str],
     test_attr_index: dict[str, list[dict]],
     test_files: dict[str, dict],
+    per_api_cap: int = 50,
 ) -> dict[str, set[str]]:
-    """Map test file → classes whose `test_*` methods reference any of `apis`."""
+    """Map test file → classes whose `test_*` methods reference any of `apis`.
+
+    Drops an API's mention-only contribution entirely when it would exceed
+    `per_api_cap`. Generic names like `add` mention-match thousands of unrelated
+    tests; over-cap APIs are too low-specificity to be a reliable signal. The
+    class-name match path (`_tests_for_apis`) is unaffected.
+    """
     by_file: dict[str, set[str]] = {}
     for api in apis:
+        api_hits: list[tuple[str, str]] = []
         for variant in api_attr_variants(api):
             for hit in test_attr_index.get(variant, []):
                 if hit["file"] not in test_files:
@@ -195,7 +208,11 @@ def _tests_mentioning_apis(
                 if hit.get("receiver_type") in _NON_TORCH_RECEIVERS:
                     continue
                 if cls := hit.get("class"):
-                    by_file.setdefault(hit["file"], set()).add(cls)
+                    api_hits.append((hit["file"], cls))
+        if len(api_hits) > per_api_cap:
+            continue
+        for path, cls in api_hits:
+            by_file.setdefault(path, set()).add(cls)
     return by_file
 
 
@@ -211,21 +228,37 @@ def affected_tests(
     test_attr_index: dict[str, list[dict]] | None = None,
     python_profiling: dict[str, dict[str, float]] | None = None,
     decomp_alias_map: dict[str, list[str]] | None = None,
+    backward_to_forward: dict[str, list[str]] | None = None,
     native_functions: dict[str, dict] | None = None,
     native_implementations: dict[str, list[dict]] | None = None,
+    kernel_impl_to_op: dict[str, str] | None = None,
     depth: int = 3,
+    mention_cap: int = 50,
 ) -> dict[str, Any]:
     """Walk callers, derive Python APIs, return PyTorch-TestRun-shaped runs."""
     walked = _walk_callers(cpp_extractor, funcs, depth)
     bindings, apis = _bindings_for(
-        walked, by_cpp_name, native_functions, native_implementations
+        walked,
+        by_cpp_name,
+        native_functions,
+        native_implementations,
+        kernel_impl_to_op,
     )
+
+    # Backward kernels are tested via gradcheck on the forward op's TestCase,
+    # so any `*_backward` API expands to its forward op name(s) before the
+    # downstream test-class / OpInfo lookups run.
+    if backward_to_forward:
+        expanded: set[str] = set()
+        for api in apis:
+            expanded.update(backward_to_forward.get(api, ()))
+        apis |= expanded
 
     # Bridge internal aten names to user-facing python ops via the decomp/refs
     # registry (e.g. convolution_overrideable → conv2d) so downstream lookups
     # find the test classes / OpInfo entries that actually exist.
     if decomp_alias_map:
-        expanded: set[str] = set()
+        expanded = set()
         for api in apis:
             expanded.update(decomp_alias_map.get(api, ()))
         apis |= expanded
@@ -236,7 +269,7 @@ def affected_tests(
     # class-name matching can't reach. Merge into class-name results.
     if test_attr_index:
         for path, classes in _tests_mentioning_apis(
-            apis, test_attr_index, test_files
+            apis, test_attr_index, test_files, per_api_cap=mention_cap
         ).items():
             by_file.setdefault(path, set()).update(classes)
 

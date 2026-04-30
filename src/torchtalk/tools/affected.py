@@ -28,8 +28,10 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
         test_attr_index=_state.test_attr_index,
         python_profiling=_state.python_profiling or None,
         decomp_alias_map=_state.decomp_alias_map or None,
+        backward_to_forward=_state.backward_to_forward or None,
         native_functions=_state.native_functions or None,
         native_implementations=_state.native_implementations or None,
+        kernel_impl_to_op=_state.kernel_impl_to_op or None,
         depth=depth,
     )
 
