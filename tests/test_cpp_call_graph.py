@@ -10,6 +10,7 @@ from torchtalk.analysis import cpp_call_graph
 from torchtalk.analysis.cpp_call_graph import (
     LIBCLANG_AVAILABLE,
     CppCallGraphExtractor,
+    _synthesize_missing_cu_entries,
     _translate_args,
 )
 
@@ -62,6 +63,97 @@ class TestTranslateArgs:
         assert "-isystem" in out and "/extra" in out
         assert "-I/foo" in out
         assert "-O2" not in out
+
+
+class TestSynthesizeMissingCuEntries:
+    """Glob .cu files and synthesize entries missing from compile_commands.json."""
+
+    @pytest.fixture
+    def cuda_env(self):
+        return {
+            "clang_resource_dir": "/r",
+            "cuda_path": "/cuda",
+            "gpu_arch": "sm_80",
+            "extra_isystem": [],
+        }
+
+    @pytest.fixture
+    def relax_exclude(self, monkeypatch):
+        # pytest's tmp_path contains "test_" which matches EXCLUDE_PATTERNS.
+        # Replace should_exclude with one that only flags real exclude patterns.
+        def stub(path: str) -> bool:
+            return "/test/" in path or "/third_party/" in path
+
+        monkeypatch.setattr(cpp_call_graph, "should_exclude", stub)
+
+    def test_synthesizes_only_missing_cu_files(self, tmp_path, cuda_env, relax_exclude):
+        cu_dir = tmp_path / "aten/src/ATen/native/cuda"
+        cu_dir.mkdir(parents=True)
+        seen = cu_dir / "Seen.cu"
+        missing = cu_dir / "Missing.cu"
+        seen.write_text("")
+        missing.write_text("")
+
+        extra = _synthesize_missing_cu_entries(
+            tmp_path,
+            ["aten/src/ATen/native"],
+            covered_files={str(seen)},
+            template_args=["-I/foo", "-DBAR=1"],
+            cuda_env=cuda_env,
+        )
+
+        paths = {p for p, _ in extra}
+        assert paths == {str(missing)}
+
+    def test_skips_files_outside_include_dirs(self, tmp_path, cuda_env, relax_exclude):
+        outside = tmp_path / "third_party/cuda/Outside.cu"
+        outside.parent.mkdir(parents=True)
+        outside.write_text("")
+
+        extra = _synthesize_missing_cu_entries(
+            tmp_path,
+            ["aten/src/ATen/native"],
+            covered_files=set(),
+            template_args=[],
+            cuda_env=cuda_env,
+        )
+        assert extra == []
+
+    def test_applies_should_exclude(self, tmp_path, cuda_env, relax_exclude):
+        test_cu = tmp_path / "aten/src/ATen/native/test/Skip.cu"
+        test_cu.parent.mkdir(parents=True)
+        test_cu.write_text("")
+
+        extra = _synthesize_missing_cu_entries(
+            tmp_path,
+            ["aten/src/ATen/native"],
+            covered_files=set(),
+            template_args=[],
+            cuda_env=cuda_env,
+        )
+        assert extra == []
+
+    def test_emits_cuda_flag_stack_for_synthesized_args(
+        self, tmp_path, cuda_env, relax_exclude
+    ):
+        cu_dir = tmp_path / "aten/src/ATen/native/cuda"
+        cu_dir.mkdir(parents=True)
+        (cu_dir / "Foo.cu").write_text("")
+
+        extra = _synthesize_missing_cu_entries(
+            tmp_path,
+            ["aten/src/ATen/native"],
+            covered_files=set(),
+            template_args=["-I/inc", "-DX=1", "-O2"],
+            cuda_env=cuda_env,
+        )
+        assert len(extra) == 1
+        _, args = extra[0]
+        assert "-x" in args and "cuda" in args
+        assert "--cuda-path=/cuda" in args
+        assert "-I/inc" in args
+        assert "-DX=1" in args
+        assert "-O2" not in args
 
 
 class TestRebuildAggregates:

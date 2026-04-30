@@ -144,6 +144,40 @@ def _translate_args(
     return [a for a in compile_args if a.startswith(("-I", "-D", "-std"))]
 
 
+def _synthesize_missing_cu_entries(
+    source: Path,
+    include_dirs: list[str],
+    covered_files: set[str],
+    template_args: list[str],
+    cuda_env: dict,
+) -> list[tuple[str, list[str]]]:
+    """Glob .cu files under include_dirs and synthesize entries for ones missing
+    from compile_commands.json.
+
+    PyTorch's compile_commands.json can list fewer .cu TUs than exist on disk
+    (e.g. CUDA build off, partial targets). Reusing a kept entry's raw args is
+    safe because `_translate_args` strips everything except `-I/-D/-std` for
+    `.cu`, then `_cu_args` adds the CUDA-specific flags.
+    """
+    extra: list[tuple[str, list[str]]] = []
+    seen: set[str] = set()
+    for inc in include_dirs:
+        root = source / inc
+        if not root.exists():
+            continue
+        for cu in root.rglob("*.cu"):
+            file_path = str(cu)
+            if file_path in covered_files or file_path in seen:
+                continue
+            if should_exclude(file_path):
+                continue
+            seen.add(file_path)
+            extra.append(
+                (file_path, _translate_args(file_path, template_args, cuda_env))
+            )
+    return extra
+
+
 def _parse_single_file(args: tuple[str, list[str]]) -> dict[str, Any]:
     """Parse a single file and extract call graph data (runs in subprocess)."""
     file_path, compile_args = args
@@ -304,6 +338,8 @@ class CppCallGraphExtractor:
 
         # Filter to relevant files using configurable patterns
         entries = []
+        covered_files: set[str] = set()
+        template_raw_args: list[str] | None = None
         for entry in compile_db:
             file_path = entry.get("file", "")
             directory = entry.get("directory", "")
@@ -327,6 +363,20 @@ class CppCallGraphExtractor:
             command = entry.get("command", "")
             args = command.split()[1:] if command else entry.get("arguments", [])[1:]
             entries.append((file_path, _translate_args(file_path, args, cuda_env)))
+            covered_files.add(file_path)
+            if template_raw_args is None:
+                template_raw_args = args
+
+        if cuda_env and template_raw_args is not None:
+            synthesized = _synthesize_missing_cu_entries(
+                source, include_dirs, covered_files, template_raw_args, cuda_env
+            )
+            if synthesized:
+                log.info(
+                    f"Synthesized {len(synthesized)} .cu entries missing from "
+                    f"compile_commands.json"
+                )
+                entries.extend(synthesized)
 
         filtered_count = sum(1 for s in self.tu_status.values() if s == "filtered")
         log.info(
