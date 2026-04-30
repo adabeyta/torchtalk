@@ -2,18 +2,22 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import MagicMock
 
 import pytest
 
 from torchtalk.analysis.affected import (
+    _api_to_source_paths,
     _class_matches_api,
     _normalize_api,
     _tests_mentioning_apis,
+    _tests_via_profiling,
     affected_tests,
     api_attr_variants,
     symbols_in_file,
 )
+from torchtalk.tools.affected import _do_affected
 
 
 class TestNormalizeApi:
@@ -380,6 +384,53 @@ class TestAffectedTestsWithAttrIndex:
         ]
 
 
+class TestApiToSourcePaths:
+    def test_dotted_api_yields_module_and_init(self):
+        paths = _api_to_source_paths("nn.functional.conv2d")
+        assert paths == ["torch/nn/functional.py", "torch/nn/functional/__init__.py"]
+
+    def test_two_part_api(self):
+        paths = _api_to_source_paths("optim.SGD")
+        assert paths == ["torch/optim.py", "torch/optim/__init__.py"]
+
+    def test_bare_api_yields_nothing(self):
+        assert _api_to_source_paths("copy_") == []
+
+    def test_underscore_namespacing_treated_as_dot(self):
+        # ATen schemas use `linalg_cross` underscore form; profiling keys are
+        # `torch/linalg.py` dot form. Bridge between them.
+        assert _api_to_source_paths("linalg_cross") == [
+            "torch/linalg.py",
+            "torch/linalg/__init__.py",
+        ]
+
+    def test_leading_underscore_yields_nothing(self):
+        assert _api_to_source_paths("_conj_physical") == []
+
+
+class TestTestsViaProfiling:
+    def test_resolves_test_via_source_file_match(self):
+        profiling = {
+            "torch/nn/functional.py": {
+                "test_nn": 1.0,
+                "test_torch": 1.0,
+            },
+        }
+        test_files = {"test/test_nn.py": {}, "test/test_torch.py": {}}
+        result = _tests_via_profiling({"nn.functional.conv2d"}, profiling, test_files)
+        assert result == {"test/test_nn.py": set(), "test/test_torch.py": set()}
+
+    def test_skips_unknown_source_file(self):
+        result = _tests_via_profiling({"nn.functional.conv2d"}, {}, {})
+        assert result == {}
+
+    def test_skips_test_files_outside_tree(self):
+        profiling = {"torch/nn/functional.py": {"test_external": 1.0}}
+        test_files = {"test/test_nn.py": {}}
+        result = _tests_via_profiling({"nn.functional.conv2d"}, profiling, test_files)
+        assert result == {}
+
+
 class TestSymbolsInFile:
     def test_returns_functions_by_suffix_match(self):
         ext = MagicMock()
@@ -401,3 +452,37 @@ class TestSymbolsInFile:
         }
         result = symbols_in_file("foo/Bar.cpp", cpp_extractor=ext)
         assert [m["function"] for m in result["functions"]] == ["f", "g"]
+
+
+class TestAffectedTool:
+    @pytest.fixture
+    def stubbed_state(self, monkeypatch):
+        """Populate _state with a minimal stub so _do_affected can run."""
+        from torchtalk import indexer
+
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+
+        monkeypatch.setattr(indexer._state, "bindings", [{"x": 1}])
+        monkeypatch.setattr(indexer._state, "cpp_extractor", ext)
+        monkeypatch.setattr(indexer._state, "by_cpp_name", {})
+        monkeypatch.setattr(indexer._state, "test_classes", {})
+        monkeypatch.setattr(indexer._state, "test_files", {})
+        monkeypatch.setattr(indexer._state, "opinfo_registry", {})
+        monkeypatch.setattr(indexer._state, "opinfo_alias_map", {})
+        monkeypatch.setattr(indexer._state, "opinfo_test_files", set())
+        monkeypatch.setattr(indexer._state, "test_attr_index", {})
+
+    def test_empty_funcs_returns_message(self, stubbed_state):
+        result = asyncio.run(_do_affected(""))
+        assert "No functions provided" in result
+
+    def test_runs_with_no_matches(self, stubbed_state):
+        result = asyncio.run(_do_affected("nonexistent_kernel"))
+        assert "No matching test runs" in result
+        assert "nonexistent_kernel" in result
+
+    def test_strips_whitespace_in_csv(self, stubbed_state):
+        # `" a , b "` should parse to ["a", "b"] not [" a ", " b "].
+        result = asyncio.run(_do_affected(" foo , bar "))
+        assert "`foo, bar`" in result

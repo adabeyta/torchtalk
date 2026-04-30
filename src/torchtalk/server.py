@@ -15,6 +15,7 @@ from .indexer import (
     _load_from_json,
     _state,
 )
+from .tools.affected import _do_affected
 from .tools.graph import _do_called_by, _do_calls, _do_impact
 from .tools.modules import _do_list_modules, _do_trace_module
 from .tools.ops import (
@@ -150,6 +151,11 @@ async def get_status() -> str:
                 test_ready,
                 "Find tests, list utils, or get test file details",
             ],
+            [
+                "`affected`",
+                cpp_ready,
+                "Map changed C++ functions to impacted Python tests",
+            ],
         ],
     )
 
@@ -231,6 +237,12 @@ async def tests(
     elif mode == "file_info":
         return await _do_test_file_info(query)
     return await _do_find_similar_tests(query, limit=limit)
+
+
+@mcp.tool()
+async def affected(funcs: str, depth: int = 3) -> str:
+    """Map changed C++ functions (comma-separated) to impacted Python test files."""
+    return await _do_affected(funcs, depth)
 
 
 def run_server(

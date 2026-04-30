@@ -57,6 +57,7 @@ class ServerState:
     opinfo_test_files: set[str] = field(default_factory=set)
     test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
     binding_bridge: dict[str, dict] = field(default_factory=dict)
+    python_profiling: dict[str, dict[str, float]] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -519,6 +520,17 @@ def _init_binding_bridge(source: str):
 
     _state.binding_bridge = build_binding_bridge(source, _state.native_functions)
     log.info(f"Binding bridge: {len(_state.binding_bridge)} qualnames")
+
+
+def load_python_profiling(path: str) -> int:
+    """Load PyTorch's `td_heuristic_profiling.json` into state. Returns entry count.
+
+    Download: https://raw.githubusercontent.com/pytorch/test-infra/generated-stats/stats/td_heuristic_profiling.json
+    """
+    data = json.loads(Path(path).read_text())
+    _state.python_profiling = data
+    log.info(f"Python profiling: {len(data)} source files")
+    return len(data)
 
 
 def _init_test_infrastructure(source: str):

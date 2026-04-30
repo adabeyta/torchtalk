@@ -133,6 +133,41 @@ _api_attr_variants = api_attr_variants  # internal alias
 _NON_TORCH_RECEIVERS = {"dict", "list", "set", "tuple", "str", "number", "bool"}
 
 
+def _api_to_source_paths(api: str) -> list[str]:
+    """Best-effort mapping of API qualname to candidate Python source paths."""
+    paths: list[str] = []
+    parts = api.split(".") if "." in api else None
+    # ATen schemas often use underscore-namespacing (`linalg_cross`); profiling
+    # keys are dot-namespaced (`torch/linalg.py`). Treat the first underscore
+    # as a namespace separator when no dot is present.
+    if parts is None and "_" in api:
+        first_us = api.find("_")
+        if first_us > 0:
+            parts = [api[:first_us], api[first_us + 1 :]]
+    if not parts or len(parts) < 2 or not parts[0] or not parts[-1]:
+        return []
+    prefix = "torch/" + "/".join(parts[:-1])
+    paths.append(prefix + ".py")
+    paths.append(prefix + "/__init__.py")
+    return paths
+
+
+def _tests_via_profiling(
+    apis: set[str],
+    python_profiling: dict[str, dict[str, float]],
+    test_files: dict[str, dict],
+) -> dict[str, set[str]]:
+    """Look up tests via PyTorch's coverage-based file→test mapping."""
+    by_file: dict[str, set[str]] = {}
+    for api in apis:
+        for src_file in _api_to_source_paths(api):
+            for test_name in python_profiling.get(src_file, ()):
+                test_path = f"test/{test_name}.py"
+                if test_path in test_files:
+                    by_file.setdefault(test_path, set())
+    return by_file
+
+
 def _tests_mentioning_apis(
     apis: set[str],
     test_attr_index: dict[str, list[dict]],
@@ -162,6 +197,7 @@ def affected_tests(
     opinfo_alias_map: dict[str, list[dict]] | None = None,
     opinfo_test_files: set[str] | None = None,
     test_attr_index: dict[str, list[dict]] | None = None,
+    python_profiling: dict[str, dict[str, float]] | None = None,
     depth: int = 3,
 ) -> dict[str, Any]:
     """Walk callers, derive Python APIs, return PyTorch-TestRun-shaped runs."""
@@ -181,6 +217,12 @@ def affected_tests(
     opinfo_keys: set[str] = set(opinfo_registry or {}) | set(opinfo_alias_map or {})
     if opinfo_test_files and apis & opinfo_keys:
         for path in opinfo_test_files:
+            by_file.setdefault(path, set())
+
+    # PyTorch CI's coverage-based map adds whole-file runs for tests that
+    # touched the API's Python source file at runtime.
+    if python_profiling:
+        for path in _tests_via_profiling(apis, python_profiling, test_files):
             by_file.setdefault(path, set())
 
     return {
