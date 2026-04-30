@@ -55,6 +55,7 @@ class ServerState:
     opinfo_registry: dict[str, dict] = field(default_factory=dict)
     opinfo_test_files: set[str] = field(default_factory=set)
     test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
+    binding_bridge: dict[str, dict] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -505,9 +506,18 @@ def _init_from_source(source: str):
         _build_indexes(_state)
 
     _state.pytorch_source = str(src)
+    _init_binding_bridge(str(src))
     _init_cpp_call_graph(str(src))
     _init_python_modules(str(src))
     _init_test_infrastructure(str(src))
+
+
+def _init_binding_bridge(source: str):
+    """Build the qualname → schema → dispatch map from .pyi + native_functions.yaml."""
+    from .analysis.binding_bridge import build_binding_bridge
+
+    _state.binding_bridge = build_binding_bridge(source, _state.native_functions)
+    log.info(f"Binding bridge: {len(_state.binding_bridge)} qualnames")
 
 
 def _init_test_infrastructure(source: str):
@@ -1114,4 +1124,5 @@ def build_index(source: str, wait_for_cpp: bool = True) -> dict:
         "nn_modules": len(_state.nn_modules),
         "test_files": len(_state.test_files),
         "test_functions": len(_state.test_functions),
+        "binding_bridge": len(_state.binding_bridge),
     }

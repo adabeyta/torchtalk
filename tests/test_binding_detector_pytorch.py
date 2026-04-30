@@ -7,23 +7,11 @@ Usage:
     PYTORCH_SOURCE=/path/to/pytorch pytest tests/test_binding_detector_pytorch.py -v
 """
 
-import os
-from pathlib import Path
-
 import pytest
 
 from torchtalk.analysis.binding_detector import BindingDetector, BindingType
 
-
-def get_pytorch_path() -> Path | None:
-    """Get PyTorch path from environment variable."""
-    for var in ("PYTORCH_SOURCE", "PYTORCH_PATH"):
-        if path := os.environ.get(var):
-            p = Path(path)
-            if p.exists() and (p / "torch").exists():
-                return p
-    return None
-
+from .conftest import get_pytorch_path
 
 PYTORCH_PATH = get_pytorch_path()
 
