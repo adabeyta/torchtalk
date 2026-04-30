@@ -53,6 +53,8 @@ class ServerState:
     test_functions: dict[str, list[dict]] = field(default_factory=dict)
     test_utilities: dict[str, dict] = field(default_factory=dict)
     opinfo_registry: dict[str, dict] = field(default_factory=dict)
+    opinfo_test_files: set[str] = field(default_factory=set)
+    test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -515,9 +517,17 @@ def _init_test_infrastructure(source: str):
     try:
         import ast
 
+        from .analysis.affected import api_attr_variants, normalize_api
+
         src = Path(source)
 
         log.info("Analyzing test infrastructure...")
+
+        # Bound the attr index by only recording mentions of names that
+        # could plausibly resolve to a known binding's API.
+        interesting_attrs: set[str] = set()
+        for py_name in _state.by_python_name:
+            interesting_attrs.update(api_attr_variants(normalize_api(py_name)))
 
         # Scan test directories
         for test_dir in TEST_SEARCH_DIRS:
@@ -558,6 +568,9 @@ def _init_test_infrastructure(source: str):
                         "imports": [],
                     }
 
+                    if _has_ops_decorator(tree):
+                        _state.opinfo_test_files.add(rel_path)
+
                     for node in ast.walk(tree):
                         # Extract test classes
                         if isinstance(node, ast.ClassDef):
@@ -594,6 +607,14 @@ def _init_test_infrastructure(source: str):
                                     _state.test_functions.setdefault(
                                         item.name, []
                                     ).append(func_info)
+                                    if interesting_attrs:
+                                        _collect_test_attr_hits(
+                                            item,
+                                            rel_path,
+                                            node.name,
+                                            interesting_attrs,
+                                            _state.test_attr_index,
+                                        )
 
                         # Extract standalone test functions
                         elif isinstance(node, ast.FunctionDef) and node.name.startswith(
@@ -610,6 +631,14 @@ def _init_test_infrastructure(source: str):
                                 _state.test_functions.setdefault(node.name, []).append(
                                     func_info
                                 )
+                                if interesting_attrs:
+                                    _collect_test_attr_hits(
+                                        node,
+                                        rel_path,
+                                        None,
+                                        interesting_attrs,
+                                        _state.test_attr_index,
+                                    )
 
                     _state.test_files[rel_path] = file_info
 
@@ -626,7 +655,8 @@ def _init_test_infrastructure(source: str):
                     "exists": True,
                 }
 
-        # Parse OpInfo registry - scan all opinfo definition files
+        # Parse OpInfo registry - scan opinfo definition files plus the main
+        # op_db source (`common_methods_invocations.py`).
         opinfo_dirs = [
             src / "torch/testing/_internal/opinfo",
             src / "torch/testing/_internal/opinfo/definitions",
@@ -635,6 +665,9 @@ def _init_test_infrastructure(source: str):
             if opinfo_dir.exists():
                 for opinfo_file in opinfo_dir.glob("*.py"):
                     _parse_opinfo_registry(str(opinfo_file))
+        op_db_main = src / "torch/testing/_internal/common_methods_invocations.py"
+        if op_db_main.exists():
+            _parse_opinfo_registry(str(op_db_main))
 
         log.info(
             f"Test infrastructure: {len(_state.test_files)} files, "
@@ -644,6 +677,50 @@ def _init_test_infrastructure(source: str):
 
     except Exception as e:
         log.warning(f"Failed to analyze test infrastructure: {e}")
+
+
+def _collect_test_attr_hits(
+    func_node,
+    file: str,
+    class_name: str | None,
+    interesting_attrs: set[str],
+    index: dict[str, list[dict]],
+) -> None:
+    """Record API-variant Attribute/Name accesses inside a `test_*` method."""
+    for sub in ast.walk(func_node):
+        name: str | None = None
+        if isinstance(sub, ast.Attribute):
+            name = sub.attr
+        elif isinstance(sub, ast.Name):
+            name = sub.id
+        if name and name in interesting_attrs:
+            index.setdefault(name, []).append(
+                {
+                    "file": file,
+                    "class": class_name,
+                    "function": func_node.name,
+                }
+            )
+
+
+def _has_ops_decorator(tree) -> bool:
+    """True if any class/function in `tree` is decorated with `@ops(...)`.
+
+    Marks files that consume `op_db` via `instantiate_device_type_tests` and
+    `@ops`, the standard PyTorch OpInfo-driven test pattern.
+    """
+    import ast
+
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.ClassDef, ast.FunctionDef)):
+            continue
+        for dec in node.decorator_list:
+            target = dec.func if isinstance(dec, ast.Call) else dec
+            if isinstance(target, ast.Name) and target.id == "ops":
+                return True
+            if isinstance(target, ast.Attribute) and target.attr == "ops":
+                return True
+    return False
 
 
 def _get_ast_name(node) -> str:
@@ -673,10 +750,14 @@ def _parse_opinfo_registry(opinfo_path: str):
         path = Path(opinfo_path)
         content = path.read_text()
 
-        # Find OpInfo definitions - pattern: OpInfo('op_name', ...)
+        # Match OpInfo and its sibling constructors (BinaryUfuncInfo,
+        # UnaryUfuncInfo, ShapeFuncInfo) — all use the same first-arg shape.
         import re
 
-        pattern = r"OpInfo\s*\(\s*['\"]([^'\"]+)['\"]"
+        pattern = (
+            r"\b(?:OpInfo|BinaryUfuncInfo|UnaryUfuncInfo|ShapeFuncInfo)"
+            r"\s*\(\s*['\"]([^'\"]+)['\"]"
+        )
 
         # Get relative path for display
         if _state.pytorch_source:
