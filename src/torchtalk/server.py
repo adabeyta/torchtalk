@@ -250,17 +250,28 @@ def run_server(
     index_path: str | None = None,
     transport: str = "stdio",
 ):
-    """Start MCP server."""
+    """Start MCP server. Heavy init runs in background so the MCP client's
+    initialize handshake completes immediately; tools return a 'not loaded'
+    error via `_ensure_loaded` until the data is ready."""
+    import threading
+
     source = pytorch_source or _auto_detect_pytorch()
-    if source:
-        _init_from_source(source)
-    elif index_path:
-        _load_from_json(index_path)
-    else:
-        log.warning(
-            "No PyTorch source specified. "
-            "Tools will return errors until data is loaded."
-        )
+
+    def _bg_init():
+        try:
+            if source:
+                _init_from_source(source)
+            elif index_path:
+                _load_from_json(index_path)
+            else:
+                log.warning(
+                    "No PyTorch source specified. "
+                    "Tools will return errors until data is loaded."
+                )
+        except Exception:
+            log.exception("Background init failed")
+
+    threading.Thread(target=_bg_init, daemon=True).start()
 
     log.info("Starting TorchTalk MCP server...")
     mcp.run(transport=transport)
