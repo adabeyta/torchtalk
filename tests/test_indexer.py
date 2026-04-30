@@ -1,12 +1,21 @@
 """Tests for indexer data structures and fuzzy matching."""
 
+import ast
 import json
 from pathlib import Path
 
 import pytest
 
 from torchtalk import indexer, snapshots
-from torchtalk.indexer import ServerState, _build_indexes, _fuzzy_find, update_index
+from torchtalk.indexer import (
+    ServerState,
+    _build_indexes,
+    _classify_rhs,
+    _collect_test_attr_hits,
+    _fuzzy_find,
+    _infer_local_types,
+    update_index,
+)
 
 
 class TestServerState:
@@ -230,3 +239,75 @@ class TestWidenReparseSet:
 
     def test_header_with_empty_basename_skipped(self, tmp_path):
         assert indexer._widen_reparse_set(tmp_path, {""}, {}) == set()
+
+
+class TestClassifyRhs:
+    def _rhs(self, code: str):
+        return ast.parse(code, mode="eval").body
+
+    def test_dict_literal(self):
+        assert _classify_rhs(self._rhs("{}")) == "dict"
+
+    def test_list_literal(self):
+        assert _classify_rhs(self._rhs("[1, 2]")) == "list"
+
+    def test_str_literal(self):
+        assert _classify_rhs(self._rhs("'hello'")) == "str"
+
+    def test_int_literal(self):
+        assert _classify_rhs(self._rhs("42")) == "number"
+
+    def test_bool_literal(self):
+        assert _classify_rhs(self._rhs("True")) == "bool"
+
+    def test_torch_call_is_tensor(self):
+        assert _classify_rhs(self._rhs("torch.randn(3, 3)")) == "tensor"
+
+    def test_F_call_is_tensor(self):
+        assert _classify_rhs(self._rhs("F.relu(x)")) == "tensor"
+
+    def test_unrelated_call_is_unknown(self):
+        assert _classify_rhs(self._rhs("foo(x)")) is None
+
+    def test_method_call_is_unknown(self):
+        assert _classify_rhs(self._rhs("self.helper()")) is None
+
+
+class TestInferLocalTypes:
+    def _func(self, code: str):
+        tree = ast.parse(code)
+        return tree.body[0]
+
+    def test_tracks_torch_assignments(self):
+        func = self._func("def f():\n    t = torch.randn(3); d = {}; n = 5\n")
+        types = _infer_local_types(func)
+        assert types == {"t": "tensor", "d": "dict", "n": "number"}
+
+    def test_skips_unknown_rhs(self):
+        func = self._func("def f():\n    x = some_helper()\n")
+        types = _infer_local_types(func)
+        assert types == {}
+
+
+class TestCollectTestAttrHits:
+    def _walk(self, code: str, interesting: set[str]):
+        tree = ast.parse(code)
+        func = tree.body[0]
+        index: dict[str, list[dict]] = {}
+        _collect_test_attr_hits(func, "test/test_x.py", "TestX", interesting, index)
+        return index
+
+    def test_records_receiver_type_for_known_local(self):
+        code = "def test_copy(self):\n    t = torch.randn(3)\n    t.copy_(other)\n"
+        index = self._walk(code, {"copy_"})
+        assert index["copy_"][0]["receiver_type"] == "tensor"
+
+    def test_records_dict_receiver(self):
+        code = "def test_copy(self):\n    d = {}\n    d.copy()\n"
+        index = self._walk(code, {"copy"})
+        assert index["copy"][0]["receiver_type"] == "dict"
+
+    def test_unknown_receiver_records_none(self):
+        code = "def test_copy(self):\n    t.copy_(other)\n"
+        index = self._walk(code, {"copy_"})
+        assert index["copy_"][0]["receiver_type"] is None

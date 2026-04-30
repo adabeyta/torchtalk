@@ -86,7 +86,10 @@ def _bindings_for(
     matched: list[dict] = []
     apis: set[str] = set()
     for fn in cpp_funcs:
-        for binding in by_cpp_name.get(fn, []):
+        # Walked names are qualified (`at::native::add`); binding keys are bare
+        # (`add`). Fall back to last `::` segment.
+        candidates = by_cpp_name.get(fn) or by_cpp_name.get(fn.rsplit("::", 1)[-1], [])
+        for binding in candidates:
             matched.append(binding)
             if py_name := binding.get("python_name"):
                 apis.add(_normalize_api(py_name))
@@ -125,24 +128,24 @@ def api_attr_variants(api: str) -> set[str]:
 
 _api_attr_variants = api_attr_variants  # internal alias
 
+# Receivers known to NOT be torch types — drop their hits (`dict.copy()`,
+# `list.copy()`, etc.). Unknown receivers (None) pass through as conservative.
+_NON_TORCH_RECEIVERS = {"dict", "list", "set", "tuple", "str", "number", "bool"}
+
 
 def _tests_mentioning_apis(
     apis: set[str],
     test_attr_index: dict[str, list[dict]],
     test_files: dict[str, dict],
 ) -> dict[str, set[str]]:
-    """Map test file → classes whose `test_*` methods reference any of `apis`.
-
-    The index is `attr_name → [{file, class, function}, ...]`, populated at
-    index time by walking each test method's AST for `ast.Attribute` nodes.
-    Catches generic-class tests (e.g. `TestTorch::test_sizes`) that
-    class-name matching can't reach.
-    """
+    """Map test file → classes whose `test_*` methods reference any of `apis`."""
     by_file: dict[str, set[str]] = {}
     for api in apis:
         for variant in _api_attr_variants(api):
             for hit in test_attr_index.get(variant, []):
                 if hit["file"] not in test_files:
+                    continue
+                if hit.get("receiver_type") in _NON_TORCH_RECEIVERS:
                     continue
                 if cls := hit.get("class"):
                     by_file.setdefault(hit["file"], set()).add(cls)

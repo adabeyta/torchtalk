@@ -259,6 +259,65 @@ class TestTestsMentioningApis:
         )
         assert result == {}
 
+    def test_drops_non_torch_receiver(self):
+        # `d.copy()` where `d` is a dict — drop the hit.
+        attr_index = {
+            "copy": [
+                {
+                    "file": "test/test_x.py",
+                    "class": "TestX",
+                    "function": "test_dict_copy",
+                    "receiver_type": "dict",
+                },
+                {
+                    "file": "test/test_x.py",
+                    "class": "TestX",
+                    "function": "test_tensor_copy",
+                    "receiver_type": "tensor",
+                },
+            ],
+        }
+        result = _tests_mentioning_apis({"copy"}, attr_index, {"test/test_x.py": {}})
+        assert result == {"test/test_x.py": {"TestX"}}
+
+    def test_keeps_unknown_receiver(self):
+        # No receiver_type recorded → pass through (conservative).
+        attr_index = {
+            "copy": [
+                {
+                    "file": "test/test_x.py",
+                    "class": "TestX",
+                    "function": "test_helper_result",
+                    # No receiver_type key
+                },
+            ],
+        }
+        result = _tests_mentioning_apis({"copy"}, attr_index, {"test/test_x.py": {}})
+        assert result == {"test/test_x.py": {"TestX"}}
+
+    def test_drops_all_non_torch_filters_file(self):
+        # When EVERY hit on a file is non-torch, the file should not appear.
+        attr_index = {
+            "copy": [
+                {
+                    "file": "test/test_dict_ops.py",
+                    "class": "TestDictOps",
+                    "function": "test_copy",
+                    "receiver_type": "dict",
+                },
+                {
+                    "file": "test/test_dict_ops.py",
+                    "class": "TestDictOps",
+                    "function": "test_copy_other",
+                    "receiver_type": "list",
+                },
+            ],
+        }
+        result = _tests_mentioning_apis(
+            {"copy"}, attr_index, {"test/test_dict_ops.py": {}}
+        )
+        assert result == {}
+
 
 class TestAffectedTestsWithAttrIndex:
     @pytest.fixture

@@ -689,6 +689,53 @@ def _init_test_infrastructure(source: str):
         log.warning(f"Failed to analyze test infrastructure: {e}")
 
 
+_TORCH_MODULE_NAMES = {"torch", "F"}
+
+
+def _classify_rhs(node) -> str | None:
+    """Best-effort type tag for an assignment RHS."""
+    if isinstance(node, ast.Dict):
+        return "dict"
+    if isinstance(node, ast.List):
+        return "list"
+    if isinstance(node, ast.Set):
+        return "set"
+    if isinstance(node, ast.Tuple):
+        return "tuple"
+    if isinstance(node, ast.Constant):
+        v = node.value
+        if isinstance(v, bool):
+            return "bool"
+        if isinstance(v, str):
+            return "str"
+        if isinstance(v, (int, float)):
+            return "number"
+    if isinstance(node, ast.Call):
+        func = node.func
+        if (
+            isinstance(func, ast.Attribute)
+            and isinstance(func.value, ast.Name)
+            and func.value.id in _TORCH_MODULE_NAMES
+        ):
+            return "tensor"
+    return None
+
+
+def _infer_local_types(func_node) -> dict[str, str]:
+    """Map local var name → inferred type within `func_node` body."""
+    types: dict[str, str] = {}
+    for sub in ast.walk(func_node):
+        if not isinstance(sub, ast.Assign):
+            continue
+        rhs_type = _classify_rhs(sub.value)
+        if rhs_type is None:
+            continue
+        for target in sub.targets:
+            if isinstance(target, ast.Name):
+                types[target.id] = rhs_type
+    return types
+
+
 def _collect_test_attr_hits(
     func_node,
     file: str,
@@ -697,10 +744,14 @@ def _collect_test_attr_hits(
     index: dict[str, list[dict]],
 ) -> None:
     """Record API-variant Attribute/Name accesses inside a `test_*` method."""
+    local_types = _infer_local_types(func_node)
     for sub in ast.walk(func_node):
         name: str | None = None
+        receiver_type: str | None = None
         if isinstance(sub, ast.Attribute):
             name = sub.attr
+            if isinstance(sub.value, ast.Name):
+                receiver_type = local_types.get(sub.value.id)
         elif isinstance(sub, ast.Name):
             name = sub.id
         if name and name in interesting_attrs:
@@ -709,6 +760,7 @@ def _collect_test_attr_hits(
                     "file": file,
                     "class": class_name,
                     "function": func_node.name,
+                    "receiver_type": receiver_type,
                 }
             )
 
