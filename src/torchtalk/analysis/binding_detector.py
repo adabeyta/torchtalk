@@ -82,15 +82,32 @@ class BindingGraph:
 
 
 _IMPL_WRAPPERS = ("TORCH_FN_BOXED", "TORCH_FN")
+_NO_IMPL_MARKERS = ("makeFallthrough", "makeNamedNotSupported")
 
 
-def _clean_impl_target(raw: str) -> str:
-    """Strip TORCH_FN/TORCH_FN_BOXED wrappers, leading `&`, and namespaces.
+def _clean_impl_target(raw: str, op_name: str = "") -> str:
+    """Extract a usable cpp_name from `m.impl("op", <raw>)`.
 
-    `m.impl("op", TORCH_FN(at::native::op))` → `op`. Without this the cpp_name
-    becomes `TORCH_FN(at::native::op` and never matches the call graph.
+    Returns `op_name` as a fallback when `raw` is a no-real-impl marker
+    (`CppFunction::makeFallthrough()`), a lambda, or a broken capture
+    (`static_cast<...>` whose inner `()` truncates the regex match). This
+    preserves the python_name → cpp_name link by keying the binding under the
+    op name itself, so the walker can still resolve it via `by_cpp_name`.
     """
     raw = raw.strip()
+    if not raw:
+        return op_name
+
+    if raw.startswith("[") or raw.startswith("static_cast"):
+        return op_name
+    if any(m in raw for m in _NO_IMPL_MARKERS):
+        return op_name
+
+    if "makeFromBoxedFunction" in raw:
+        if m := re.search(r"<\s*&?\s*([\w:]+)", raw):
+            return m.group(1).rsplit("::", 1)[-1]
+        return op_name
+
     for wrapper in _IMPL_WRAPPERS:
         prefix = wrapper + "("
         if raw.startswith(prefix):
@@ -99,10 +116,11 @@ def _clean_impl_target(raw: str) -> str:
                 raw = raw[:-1]
             raw = raw.strip()
             break
+
     raw = raw.lstrip("&").strip()
     if "::" in raw:
         raw = raw.rsplit("::", 1)[-1]
-    return raw
+    return raw or op_name
 
 
 class BindingDetector:
@@ -435,7 +453,10 @@ class BindingDetector:
         impl_pattern = r'm\.impl\s*\(\s*"([^"]+)"\s*,\s*([^,;]+?)\s*(?:[,)]|;)'
         for match in re.finditer(impl_pattern, block_content):
             op_name = match.group(1)
-            cpp_func = _clean_impl_target(match.group(2))
+            # Strip overload suffix (`abs.out` → `abs`) so cpp_name is searchable
+            # via the bare op name when raw target is a no-impl marker.
+            bare_op = op_name.split(".", 1)[0]
+            cpp_func = _clean_impl_target(match.group(2), op_name=bare_op)
             if not cpp_func:
                 continue
             line_offset = block_content[: match.start()].count("\n")

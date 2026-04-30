@@ -78,18 +78,35 @@ def _walk_callers(
 
 
 def _bindings_for(
-    cpp_funcs: set[str], by_cpp_name: dict[str, list[dict]]
+    cpp_funcs: set[str],
+    by_cpp_name: dict[str, list[dict]],
+    native_functions: dict[str, dict] | None = None,
+    native_implementations: dict[str, list[dict]] | None = None,
 ) -> tuple[list[dict], set[str]]:
     matched: list[dict] = []
     apis: set[str] = set()
     for fn in cpp_funcs:
         # Walked names are qualified (`at::native::add`); binding keys are bare
         # (`add`). Fall back to last `::` segment.
-        candidates = by_cpp_name.get(fn) or by_cpp_name.get(fn.rsplit("::", 1)[-1], [])
+        bare = fn.rsplit("::", 1)[-1]
+        candidates = by_cpp_name.get(fn) or by_cpp_name.get(bare, [])
         for binding in candidates:
             matched.append(binding)
             if py_name := binding.get("python_name"):
                 apis.add(normalize_api(py_name))
+        # native_functions.yaml resolution: when no binding has cpp_name == bare,
+        # the bare symbol may itself be the ATen op name (the implicit-dispatch
+        # rule + structured/composite kernels). Use native_functions /
+        # native_implementations as the source of truth.
+        if not candidates:
+            base = bare.rstrip("_")
+            base = base[:-4] if base.endswith("_out") else base
+            for key in (bare, base):
+                if (native_implementations and key in native_implementations) or (
+                    native_functions and key in native_functions
+                ):
+                    apis.add(key)
+                    break
     return matched, apis
 
 
@@ -194,11 +211,15 @@ def affected_tests(
     test_attr_index: dict[str, list[dict]] | None = None,
     python_profiling: dict[str, dict[str, float]] | None = None,
     decomp_alias_map: dict[str, list[str]] | None = None,
+    native_functions: dict[str, dict] | None = None,
+    native_implementations: dict[str, list[dict]] | None = None,
     depth: int = 3,
 ) -> dict[str, Any]:
     """Walk callers, derive Python APIs, return PyTorch-TestRun-shaped runs."""
     walked = _walk_callers(cpp_extractor, funcs, depth)
-    bindings, apis = _bindings_for(walked, by_cpp_name)
+    bindings, apis = _bindings_for(
+        walked, by_cpp_name, native_functions, native_implementations
+    )
 
     # Bridge internal aten names to user-facing python ops via the decomp/refs
     # registry (e.g. convolution_overrideable → conv2d) so downstream lookups

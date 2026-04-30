@@ -28,6 +28,41 @@ class TestCleanImplTarget:
         assert _clean_impl_target("TORCH_FN_BOXED(foo)") == "foo"
         assert _clean_impl_target("TORCH_FN_BOXED(at::native::foo)") == "foo"
 
+    def test_makefallthrough_falls_back_to_op_name(self):
+        # `m.impl("abs", CppFunction::makeFallthrough())` has no real impl;
+        # use op_name so by_cpp_name["abs"] still resolves.
+        assert (
+            _clean_impl_target("CppFunction::makeFallthrough(", op_name="abs") == "abs"
+        )
+
+    def test_makenamednotsupported_falls_back(self):
+        assert (
+            _clean_impl_target("CppFunction::makeNamedNotSupported(", op_name="foo")
+            == "foo"
+        )
+
+    def test_makefromboxedfunction_extracts_template_arg(self):
+        assert (
+            _clean_impl_target(
+                "CppFunction::makeFromBoxedFunction<&unsupportedDynamicOp>("
+            )
+            == "unsupportedDynamicOp"
+        )
+        assert (
+            _clean_impl_target("CppFunction::makeFromBoxedFunction<at::native::foo>(")
+            == "foo"
+        )
+
+    def test_static_cast_falls_back_to_op_name(self):
+        # static_cast captures break the regex; use op_name fallback.
+        assert _clean_impl_target("static_cast<int64_t (*", op_name="size") == "size"
+
+    def test_lambda_falls_back_to_op_name(self):
+        assert _clean_impl_target("[](Tensor", op_name="layer_norm") == "layer_norm"
+
+    def test_empty_returns_op_name(self):
+        assert _clean_impl_target("", op_name="foo") == "foo"
+
 
 class TestImplRegex:
     """Verify cpp_name no longer leaks `TORCH_FN(` wrappers."""
@@ -65,3 +100,29 @@ class TestImplRegex:
         cpp_names = {cpp for _, cpp in bindings}
         assert "foo" in cpp_names
         assert "bar" in cpp_names
+
+    def test_makefallthrough_keys_under_op_name(self):
+        # The fallthrough has no real C++ impl, but we still want the binding
+        # keyed under `abs` so a walk through `at::native::abs` finds it.
+        src = """
+        TORCH_LIBRARY_IMPL(aten, Named, m) {
+            m.impl("abs", CppFunction::makeFallthrough());
+            m.impl("abs.out", CppFunction::makeFallthrough());
+        }
+        """
+        bindings = self._detect(src)
+        cpp_names = {cpp for _, cpp in bindings}
+        assert "abs" in cpp_names
+        # Overload `abs.out` should also key under bare `abs`
+        assert all(cpp == "abs" for _, cpp in bindings)
+
+    def test_makefromboxedfunction_keys_under_template_arg(self):
+        src = """
+        TORCH_LIBRARY_IMPL(aten, FuncTorchBatched, m) {
+            m.impl("nonzero",
+                torch::CppFunction::makeFromBoxedFunction<&unsupportedDynamicOp>());
+        }
+        """
+        bindings = self._detect(src)
+        cpp_names = {cpp for _, cpp in bindings}
+        assert "unsupportedDynamicOp" in cpp_names

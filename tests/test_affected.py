@@ -249,6 +249,62 @@ class TestAffectedTests:
         assert "convolution_overrideable" in result["python_apis"]
         assert {tr["file"] for tr in result["test_runs"]} == {"test/test_nn.py"}
 
+    def test_native_implementations_fallback_resolves_api(self, extractor):
+        # Walked C++ func has NO matching binding (e.g. fallthrough cases where
+        # cpp_name is a no-impl marker), but native_implementations confirms
+        # `abs` is an ATen op name. Resolution should still produce API "abs".
+        by_cpp_name = {}  # empty — no binding cpp_name matches
+        native_implementations = {"abs": [{"function_name": "abs", "file_path": "x"}]}
+        test_classes = {
+            "TestAbs": [
+                {"file": "test/test_unary.py", "is_test_class": True, "line": 1}
+            ],
+        }
+        test_files = {"test/test_unary.py": {}}
+
+        result = affected_tests(
+            funcs=["at::native::abs"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes=test_classes,
+            test_files=test_files,
+            native_implementations=native_implementations,
+            depth=1,
+        )
+        assert result["python_apis"] == ["abs"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_unary.py"}
+
+    def test_native_functions_fallback_strips_out_suffix(self):
+        # `at::native::abs_out` → strip `_out` → look up `abs` in native_functions.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        result = affected_tests(
+            funcs=["at::native::abs_out"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            native_functions={"abs": {"name": "abs"}},
+            depth=1,
+        )
+        assert "abs" in result["python_apis"]
+
+    def test_native_fallback_skipped_when_binding_matches(self, extractor):
+        # When by_cpp_name resolves the walked name, native_functions fallback
+        # must NOT also fire (don't double-count APIs).
+        by_cpp_name = {"abs": [{"python_name": "aten.abs", "cpp_name": "abs"}]}
+        result = affected_tests(
+            funcs=["at::native::abs"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},
+            test_files={},
+            native_functions={"abs": {}},
+            depth=1,
+        )
+        # Single API "abs" — derived from binding, fallback didn't add a duplicate.
+        assert result["python_apis"] == ["abs"]
+
     def test_no_decomp_alias_map_leaves_apis_untouched(self, extractor):
         # Same setup, but without decomp_alias_map: no expansion, no test runs.
         by_cpp_name = {
