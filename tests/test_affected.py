@@ -175,7 +175,10 @@ class TestAffectedTests:
             "test/test_meta.py": [],
         }
 
-    def test_no_opinfo_match_skips_opinfo_files(self, extractor):
+    def test_no_opinfo_match_falls_back_to_opinfo_files(self, extractor):
+        # API resolved but not in OpInfo and no test class matches → catch-all
+        # adds OpInfo whole-file runs (test_ops.py / test_meta.py exercise
+        # ops via @ops(op_db) parametrization).
         by_cpp_name = {"foo_kernel": [{"python_name": "aten.foo"}]}
         opinfo_registry = {"bar": {}}  # foo not registered
         opinfo_test_files = {"test/test_ops.py"}
@@ -190,7 +193,7 @@ class TestAffectedTests:
             opinfo_test_files=opinfo_test_files,
             depth=1,
         )
-        assert result["test_runs"] == []
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_ops.py"}
 
     def test_opinfo_alias_match_expands_files(self, extractor):
         # API "conv2d" not in opinfo_registry directly, but is in alias_map
@@ -276,6 +279,152 @@ class TestAffectedTests:
         assert "sigmoid" in result["python_apis"]
         assert "sigmoid_backward" in result["python_apis"]
         assert {tr["file"] for tr in result["test_runs"]} == {"test/test_unary.py"}
+
+    def test_kernel_suffix_strip_falls_back_to_native_function(self, extractor):
+        # binary_cross_entropy_kernel has no REGISTER_DISPATCH stub but the
+        # base name (suffix-stripped) IS in native_functions.
+        result = affected_tests(
+            funcs=["at::native::binary_cross_entropy_kernel"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={
+                "TestBinaryCrossEntropy": [
+                    {"file": "test/test_loss.py", "is_test_class": True, "line": 1}
+                ]
+            },
+            test_files={"test/test_loss.py": {}},
+            native_functions={"binary_cross_entropy": {}},
+            depth=1,
+        )
+        assert "binary_cross_entropy" in result["python_apis"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_loss.py"}
+
+    def test_pascal_kernel_impl_resolves_to_snake_case_op(self, extractor):
+        # GeluCUDAKernelImpl → strip CUDAKernelImpl → Gelu → gelu (in native_fns).
+        result = affected_tests(
+            funcs=["at::native::GeluCUDAKernelImpl"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={
+                "TestGelu": [
+                    {"file": "test/test_nn.py", "is_test_class": True, "line": 1}
+                ]
+            },
+            test_files={"test/test_nn.py": {}},
+            native_functions={"gelu": {}},
+            depth=1,
+        )
+        assert "gelu" in result["python_apis"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_nn.py"}
+
+    def test_pascal_kernel_impl_falls_back_to_native_prefix(self, extractor):
+        # LayerNormBackwardKernelImpl → layer_norm_backward NOT in native_fns,
+        # but native_layer_norm_backward IS — fallback should resolve.
+        result = affected_tests(
+            funcs=["at::native::LayerNormBackwardKernelImpl"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            native_functions={"native_layer_norm_backward": {}},
+            depth=1,
+        )
+        assert "native_layer_norm_backward" in result["python_apis"]
+
+    def test_pascal_kernel_impl_handles_acronym_runs(self, extractor):
+        # RMSNormKernelImpl → acronym `RMS` correctly splits to `rms_norm`.
+        result = affected_tests(
+            funcs=["at::native::RMSNormKernelImpl"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            native_functions={"rms_norm": {}},
+            depth=1,
+        )
+        assert "rms_norm" in result["python_apis"]
+
+    def test_pascal_kernel_impl_no_match_when_op_unknown(self, extractor):
+        # ChooseQuantizationParamsKernelImpl → snake `choose_quantization_params`
+        # NOT in native_functions — no API is added.
+        result = affected_tests(
+            funcs=["at::native::ChooseQuantizationParamsKernelImpl"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            native_functions={"some_other_op": {}},
+            depth=1,
+        )
+        assert result["python_apis"] == []
+
+    def test_dispatch_reverse_index_resolves_vendor_backend(self, extractor):
+        # cudnn_convolution_forward isn't its own native_function entry, but
+        # the dispatch reverse index maps it to cudnn_convolution.
+        dispatch_to_op = {"cudnn_convolution_forward": "cudnn_convolution"}
+        result = affected_tests(
+            funcs=["at::native::cudnn_convolution_forward"],
+            cpp_extractor=extractor,
+            by_cpp_name={},
+            test_classes={
+                "TestCudnnConvolution": [
+                    {"file": "test/test_conv.py", "is_test_class": True, "line": 1}
+                ]
+            },
+            test_files={"test/test_conv.py": {}},
+            dispatch_to_op=dispatch_to_op,
+            depth=1,
+        )
+        assert "cudnn_convolution" in result["python_apis"]
+        assert {tr["file"] for tr in result["test_runs"]} == {"test/test_conv.py"}
+
+    def test_catchall_opinfo_when_no_test_class_matches(self, extractor):
+        # API resolved (convolution_overrideable) but no test class by name and
+        # not in OpInfo → fall back to OpInfo whole-file runs.
+        by_cpp_name = {
+            "convolution_overrideable": [
+                {
+                    "python_name": "aten.convolution_overrideable",
+                    "cpp_name": "convolution_overrideable",
+                }
+            ]
+        }
+        result = affected_tests(
+            funcs=["at::native::convolution_overrideable"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={},  # no class matches
+            test_files={"test/test_ops.py": {}, "test/test_meta.py": {}},
+            opinfo_test_files={"test/test_ops.py", "test/test_meta.py"},
+            depth=1,
+        )
+        files = {tr["file"] for tr in result["test_runs"]}
+        assert files == {"test/test_ops.py", "test/test_meta.py"}
+
+    def test_catchall_skipped_when_test_class_already_matched(self, extractor):
+        # If class-name match already produced a hit, don't add catch-all noise.
+        by_cpp_name = {
+            "softmax": [{"python_name": "aten.softmax", "cpp_name": "softmax"}]
+        }
+        result = affected_tests(
+            funcs=["at::native::softmax"],
+            cpp_extractor=extractor,
+            by_cpp_name=by_cpp_name,
+            test_classes={
+                "TestSoftmax": [
+                    {"file": "test/test_nn.py", "is_test_class": True, "line": 1}
+                ]
+            },
+            test_files={
+                "test/test_nn.py": {},
+                "test/test_ops.py": {},
+                "test/test_meta.py": {},
+            },
+            opinfo_test_files={"test/test_ops.py", "test/test_meta.py"},
+            depth=1,
+        )
+        files = {tr["file"] for tr in result["test_runs"]}
+        assert files == {"test/test_nn.py"}
 
     def test_kernel_impl_to_op_fallback_resolves_api(self, extractor):
         # Walked C++ func is a kernel impl name; no binding, no native_function
@@ -375,6 +524,250 @@ class TestAffectedTests:
         )
         assert result["python_apis"] == ["convolution_overrideable"]
         assert result["test_runs"] == []
+
+    def test_file_cohort_expands_apis_for_small_file(self, extractor):
+        # Matched binding lives in a file with 3 sibling kernels (≤cohort_cap):
+        # all sibling python_names should join the API set.
+        binding = {
+            "python_name": "aten.lift",
+            "cpp_name": "lift_functionalize",
+            "file_path": "aten/src/ATen/FunctionalizeFallbackKernel.cpp",
+        }
+        siblings = [
+            binding,
+            {
+                "python_name": "aten.lift_fresh",
+                "cpp_name": "lift_fresh_functionalize",
+                "file_path": "aten/src/ATen/FunctionalizeFallbackKernel.cpp",
+            },
+            {
+                "python_name": "aten._to_copy",
+                "cpp_name": "_to_copy_functionalize",
+                "file_path": "aten/src/ATen/FunctionalizeFallbackKernel.cpp",
+            },
+        ]
+        result = affected_tests(
+            funcs=["lift_functionalize"],
+            cpp_extractor=extractor,
+            by_cpp_name={"lift_functionalize": [binding]},
+            test_classes={},
+            test_files={},
+            bindings_by_file={
+                "aten/src/ATen/FunctionalizeFallbackKernel.cpp": siblings,
+            },
+            depth=1,
+        )
+        assert set(result["python_apis"]) == {"lift", "lift_fresh", "_to_copy"}
+
+    def test_file_cohort_cap_suppresses_large_file(self, extractor):
+        # Cohort over the cap (registry-style file) is skipped; only the matched
+        # binding's API is included.
+        binding = {
+            "python_name": "aten.lift",
+            "cpp_name": "lift_functionalize",
+            "file_path": "aten/src/ATen/core/NamedRegistrations.cpp",
+        }
+        big_cohort = [binding] + [
+            {
+                "python_name": f"aten.op_{i}",
+                "cpp_name": f"op_{i}",
+                "file_path": "aten/src/ATen/core/NamedRegistrations.cpp",
+            }
+            for i in range(20)
+        ]
+        result = affected_tests(
+            funcs=["lift_functionalize"],
+            cpp_extractor=extractor,
+            by_cpp_name={"lift_functionalize": [binding]},
+            test_classes={},
+            test_files={},
+            bindings_by_file={
+                "aten/src/ATen/core/NamedRegistrations.cpp": big_cohort,
+            },
+            cohort_cap=15,
+            depth=1,
+        )
+        assert result["python_apis"] == ["lift"]
+
+    def test_file_cohort_disabled_when_no_index(self, extractor):
+        # Without bindings_by_file, only the directly matched binding contributes.
+        binding = {
+            "python_name": "aten.lift",
+            "cpp_name": "lift_functionalize",
+            "file_path": "aten/src/ATen/FunctionalizeFallbackKernel.cpp",
+        }
+        result = affected_tests(
+            funcs=["lift_functionalize"],
+            cpp_extractor=extractor,
+            by_cpp_name={"lift_functionalize": [binding]},
+            test_classes={},
+            test_files={},
+            depth=1,
+        )
+        assert result["python_apis"] == ["lift"]
+
+    def test_seed_file_ops_bridges_inner_helper_to_parent(self):
+        # raw_cudnn_convolution_forward_out has no callers in the call graph
+        # but lives in ConvShared.cpp alongside cudnn_convolution. ops_by_file
+        # bridges the helper to the parent op family.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {
+            "at::native::raw_cudnn_convolution_forward_out": (
+                "aten/src/ATen/native/cudnn/ConvShared.cpp",
+                208,
+            ),
+        }
+        ops_by_file = {
+            "aten/src/ATen/native/cudnn/ConvShared.cpp": {
+                "cudnn_convolution",
+                "cudnn_convolution_transpose",
+                "cudnn_convolution_relu",
+            },
+        }
+        result = affected_tests(
+            funcs=["raw_cudnn_convolution_forward_out"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            depth=1,
+        )
+        assert "cudnn_convolution" in result["python_apis"]
+        assert "cudnn_convolution_transpose" in result["python_apis"]
+
+    def test_seed_file_ops_caps_large_files(self):
+        # File with > cohort_cap ops is skipped; helper resolves to nothing.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {
+            "at::native::helper": ("aten/src/ATen/native/Big.cpp", 1),
+        }
+        ops_by_file = {
+            "aten/src/ATen/native/Big.cpp": {f"op_{i}" for i in range(20)},
+        }
+        result = affected_tests(
+            funcs=["helper"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            cohort_cap=15,
+            depth=1,
+        )
+        assert result["python_apis"] == []
+
+    def test_symbol_to_file_fallback_when_call_graph_empty(self):
+        # libclang missed the symbol entirely (file body preprocessed out, e.g.
+        # `#if AT_CUDNN_ENABLED()` with cuDNN disabled). The regex-derived
+        # symbol_to_file gives us the file anyway.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {}  # call graph empty for our target
+        symbol_to_file = {
+            "cudnn_convolution_forward_out": (
+                "/p/aten/src/ATen/native/cudnn/ConvShared.cpp"
+            ),
+        }
+        ops_by_file = {
+            "/p/aten/src/ATen/native/cudnn/ConvShared.cpp": {
+                "cudnn_convolution",
+                "cudnn_convolution_transpose",
+            },
+        }
+        result = affected_tests(
+            funcs=["cudnn_convolution_forward_out"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            symbol_to_file=symbol_to_file,
+            depth=1,
+        )
+        assert "cudnn_convolution" in result["python_apis"]
+        assert "cudnn_convolution_transpose" in result["python_apis"]
+
+    def test_dir_fallback_aggregates_when_file_has_no_ops(self):
+        # Symbol's file (MHA.cpp) has no registered ops, but the cudnn dir
+        # has bindings in sibling files — directory aggregation picks them up.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {
+            "at::native::run_cudnn_SDP_fprop": (
+                "/p/aten/src/ATen/native/cudnn/MHA.cpp",
+                15,
+            ),
+        }
+        ops_by_file = {
+            "/p/aten/src/ATen/native/cudnn/MHA.cpp": set(),  # helper-only
+            "/p/aten/src/ATen/native/cudnn/ConvShared.cpp": {"cudnn_convolution"},
+            "/p/aten/src/ATen/native/cudnn/BatchNorm.cpp": {"cudnn_batch_norm"},
+        }
+        result = affected_tests(
+            funcs=["run_cudnn_SDP_fprop"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            depth=1,
+        )
+        apis = set(result["python_apis"])
+        assert "cudnn_convolution" in apis
+        assert "cudnn_batch_norm" in apis
+
+    def test_dir_fallback_skips_non_vendor_paths(self):
+        # File outside vendor backend dirs does NOT trigger directory fallback.
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {
+            "at::native::helper": ("/p/aten/src/ATen/native/cpu/Helper.cpp", 1),
+        }
+        ops_by_file = {
+            "/p/aten/src/ATen/native/cpu/Helper.cpp": set(),
+            "/p/aten/src/ATen/native/cpu/Other.cpp": {"foo"},
+        }
+        result = affected_tests(
+            funcs=["helper"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            depth=1,
+        )
+        assert result["python_apis"] == []
+
+    def test_dir_fallback_respects_dir_cap(self):
+        # Vendor dir aggregates over dir_cap → reject (no expansion).
+        ext = MagicMock()
+        ext.get_callers.return_value = []
+        ext.function_locations = {
+            "at::native::helper": (
+                "/p/aten/src/ATen/native/cudnn/Helper.cpp",
+                1,
+            ),
+        }
+        ops_by_file = {
+            "/p/aten/src/ATen/native/cudnn/Helper.cpp": set(),
+        } | {
+            f"/p/aten/src/ATen/native/cudnn/F{i}.cpp": {f"op_{i}"}
+            for i in range(35)
+        }
+        result = affected_tests(
+            funcs=["helper"],
+            cpp_extractor=ext,
+            by_cpp_name={},
+            test_classes={},
+            test_files={},
+            ops_by_file=ops_by_file,
+            dir_cap=30,
+            depth=1,
+        )
+        assert result["python_apis"] == []
 
 
 class TestApiAttrVariants:

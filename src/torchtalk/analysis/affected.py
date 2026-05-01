@@ -7,9 +7,11 @@ test names from `instantiate_device_type_tests`.
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from .cpp_call_graph import CppCallGraphExtractor
+from .patterns import is_vendor_path
 
 _OVERLOAD_TAG_LITERALS = {"int", "default", "out", "self"}
 
@@ -77,12 +79,140 @@ def _walk_callers(
     return visited
 
 
+_IMPL_SUFFIXES = (
+    "_kernel_impl",
+    "_cuda_kernel",
+    "_kernel",
+    "_forward",
+    "_symint",
+)
+
+
+def _strip_impl_suffix(name: str) -> list[str]:
+    """Strip a trailing impl-marker suffix (`_kernel`, `_forward`, `_symint`, ...).
+
+    Returns a single-element list with the bare stem, or empty if no suffix
+    matched. The caller must confirm the stem is in `native_functions` before
+    treating it as an op name (keeps false positives out).
+    """
+    for suffix in _IMPL_SUFFIXES:
+        if name.endswith(suffix):
+            return [name[: -len(suffix)]]
+    return []
+
+
+_PLATFORM_TAGS = ("CUDA", "CPU", "MPS")
+_PASCAL_BOUNDARY_RE = re.compile(r"(?<=[a-z0-9])([A-Z])")
+_PASCAL_ACRONYM_RE = re.compile(r"([A-Z]+)(?=[A-Z][a-z])")
+
+
+def _pascal_kernel_impl_candidates(name: str) -> list[str]:
+    """PascalCase `<Op>[Platform]KernelImpl` → snake_case op candidates.
+
+    `GeluCUDAKernelImpl` → `['gelu', 'native_gelu']`;
+    `LayerNormBackwardKernelImpl` → `['layer_norm_backward',
+    'native_layer_norm_backward']`. Acronym runs split correctly:
+    `RMSNormBackwardKernelImpl` → `['rms_norm_backward', ...]`.
+
+    The `native_` prefix variant covers ops whose schema name carries the
+    `native_` prefix (`native_layer_norm_backward`) while the kernel symbol
+    drops it. Caller must verify candidates exist in `native_functions`.
+    """
+    if not name.endswith("KernelImpl"):
+        return []
+    base = name[: -len("KernelImpl")]
+    for tag in _PLATFORM_TAGS:
+        if base.endswith(tag):
+            base = base[: -len(tag)]
+            break
+    if not base or not base[0].isupper():
+        return []
+    snake = _PASCAL_ACRONYM_RE.sub(r"\1_", base)
+    snake = _PASCAL_BOUNDARY_RE.sub(r"_\1", snake)
+    snake = snake.lower()
+    return [snake, f"native_{snake}"]
+
+
+def _seed_file_op_cohort(
+    funcs: list[str],
+    cpp_extractor: CppCallGraphExtractor,
+    ops_by_file: dict[str, set[str]],
+    cohort_cap: int,
+    symbol_to_file: dict[str, str] | None = None,
+    dir_cap: int = 30,
+) -> set[str]:
+    """Bridge inner vendor-backend helpers to their parent op family.
+
+    Three-step resolution for an input symbol:
+      1. `cpp_extractor.function_locations` lookup (call-graph derived).
+      2. If libclang missed the symbol (e.g. ConvShared.cpp's body is gated
+         by `#if AT_CUDNN_ENABLED()` and the build has cuDNN off), fall back
+         to `symbol_to_file` — the regex-derived index of vendor-dir helpers.
+      3. If the resolved file's `ops_by_file` is empty (e.g. MHA.cpp holds
+         only helpers, no registered op), aggregate ops from sibling files
+         in the same vendor directory, capped at `dir_cap`.
+    """
+    locs = cpp_extractor.function_locations
+    extra: set[str] = set()
+    for func in funcs:
+        bare = func.rsplit("::", 1)[-1]
+        loc = (
+            locs.get(func)
+            or locs.get(f"at::native::{bare}")
+            or locs.get(bare)
+        )
+        file = loc[0] if loc else (symbol_to_file or {}).get(bare)
+        if not file:
+            continue
+        siblings = ops_by_file.get(file, set())
+        cap = cohort_cap
+        if not siblings and is_vendor_path(file):
+            dir_prefix = file.rsplit("/", 1)[0] + "/"
+            agg: set[str] = set()
+            for fp, ops in ops_by_file.items():
+                if fp.startswith(dir_prefix):
+                    agg |= ops
+            siblings = agg
+            cap = dir_cap
+        if not siblings or len(siblings) > cap:
+            continue
+        extra |= siblings
+    return extra
+
+
+def _file_cohort_apis(
+    matched: list[dict],
+    bindings_by_file: dict[str, list[dict]],
+    cohort_cap: int,
+) -> set[str]:
+    """Return sibling-binding APIs from each matched binding's source file.
+
+    A dev editing a kernel file typically touches multiple kernels in that
+    file; their tests should run together. Mirrors PyTorch's own file-level
+    `Profiling`/`Filepath` heuristics. Files exceeding `cohort_cap` (registry
+    files like `NamedRegistrations.cpp`) are skipped to avoid flooding.
+    """
+    cohort_files = {b.get("file_path") for b in matched if b.get("file_path")}
+    extra: set[str] = set()
+    for fp in cohort_files:
+        siblings = bindings_by_file.get(fp, [])
+        if len(siblings) > cohort_cap:
+            continue
+        for sib in siblings:
+            if py_name := sib.get("python_name"):
+                extra.add(normalize_api(py_name))
+    return extra
+
+
 def _bindings_for(
     cpp_funcs: set[str],
     by_cpp_name: dict[str, list[dict]],
     native_functions: dict[str, dict] | None = None,
     native_implementations: dict[str, list[dict]] | None = None,
     kernel_impl_to_op: dict[str, str] | None = None,
+    dispatch_to_op: dict[str, str] | None = None,
+    bindings_by_file: dict[str, list[dict]] | None = None,
+    cohort_cap: int = 15,
 ) -> tuple[list[dict], set[str]]:
     matched: list[dict] = []
     apis: set[str] = set()
@@ -98,10 +228,18 @@ def _bindings_for(
         if candidates:
             continue
         # Fallback A: bare symbol is itself an ATen op name (implicit-dispatch
-        # rule + structured/composite kernels).
+        # rule + structured/composite kernels). Also try a kernel-suffix-
+        # stripped candidate so `binary_cross_entropy_kernel` resolves to
+        # `binary_cross_entropy`.
         base = bare.rstrip("_")
         base = base[:-4] if base.endswith("_out") else base
-        for key in (bare, base):
+        keys = [
+            bare,
+            base,
+            *_strip_impl_suffix(bare),
+            *_pascal_kernel_impl_candidates(bare),
+        ]
+        for key in keys:
             if (native_implementations and key in native_implementations) or (
                 native_functions and key in native_functions
             ):
@@ -110,8 +248,15 @@ def _bindings_for(
         else:
             # Fallback B: bare symbol is a CPU/CUDA kernel impl registered via
             # REGISTER_DISPATCH(stub, &kernel) — resolve via stub-to-op map.
-            if kernel_impl_to_op and (op := kernel_impl_to_op.get(bare)):
+            # Fallback C: vendor-backend symbol referenced from a parent op's
+            # `dispatch:` table (e.g. `cudnn_convolution_forward` →
+            # `cudnn_convolution`).
+            if (kernel_impl_to_op and (op := kernel_impl_to_op.get(bare))) or (
+                dispatch_to_op and (op := dispatch_to_op.get(bare))
+            ):
                 apis.add(op)
+    if bindings_by_file:
+        apis |= _file_cohort_apis(matched, bindings_by_file, cohort_cap)
     return matched, apis
 
 
@@ -232,8 +377,14 @@ def affected_tests(
     native_functions: dict[str, dict] | None = None,
     native_implementations: dict[str, list[dict]] | None = None,
     kernel_impl_to_op: dict[str, str] | None = None,
+    dispatch_to_op: dict[str, str] | None = None,
+    bindings_by_file: dict[str, list[dict]] | None = None,
+    ops_by_file: dict[str, set[str]] | None = None,
+    symbol_to_file: dict[str, str] | None = None,
     depth: int = 3,
     mention_cap: int = 50,
+    cohort_cap: int = 15,
+    dir_cap: int = 30,
 ) -> dict[str, Any]:
     """Walk callers, derive Python APIs, return PyTorch-TestRun-shaped runs."""
     walked = _walk_callers(cpp_extractor, funcs, depth)
@@ -243,7 +394,23 @@ def affected_tests(
         native_functions,
         native_implementations,
         kernel_impl_to_op,
+        dispatch_to_op,
+        bindings_by_file,
+        cohort_cap,
     )
+
+    # Vendor-helper bridge: when the input symbol's source file declares native
+    # ops (e.g. cudnn helpers in `ConvShared.cpp` alongside `cudnn_convolution`),
+    # union those ops in. Catches cases where the call graph misses upward edges.
+    if ops_by_file:
+        apis |= _seed_file_op_cohort(
+            funcs,
+            cpp_extractor,
+            ops_by_file,
+            cohort_cap,
+            symbol_to_file=symbol_to_file,
+            dir_cap=dir_cap,
+        )
 
     # Backward kernels are tested via gradcheck on the forward op's TestCase,
     # so any `*_backward` API expands to its forward op name(s) before the
@@ -283,6 +450,15 @@ def affected_tests(
     # touched the API's Python source file at runtime.
     if python_profiling:
         for path in _tests_via_profiling(apis, python_profiling, test_files):
+            by_file.setdefault(path, set())
+
+    # Catch-all: APIs resolved but no test file matched anywhere. Internal
+    # ops (`convolution_overrideable`, `_safe_softmax`) often have no dedicated
+    # test class and aren't in OpInfo, but they're exercised transitively from
+    # the catch-all `@ops(op_db)` test classes in test_ops.py / test_meta.py.
+    # Cost is low (parametrized tests skip non-matching ops).
+    if apis and not by_file and opinfo_test_files:
+        for path in opinfo_test_files:
             by_file.setdefault(path, set())
 
     return {

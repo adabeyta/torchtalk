@@ -17,6 +17,7 @@ from .analysis.patterns import (
     PYTHON_SEARCH_DIRS,
     TEST_SEARCH_DIRS,
     TEST_UTILITY_MODULES,
+    is_vendor_path,
 )
 from .analysis.patterns import (
     has_test_patterns as _has_test_patterns,
@@ -38,10 +39,13 @@ class ServerState:
     native_functions: dict[str, dict] = field(default_factory=dict)
     derivatives: dict[str, dict] = field(default_factory=dict)
     native_implementations: dict[str, list[dict]] = field(default_factory=dict)
+    symbol_to_file: dict[str, str] = field(default_factory=dict)
 
     by_python_name: dict[str, list[dict]] = field(default_factory=dict)
     by_cpp_name: dict[str, list[dict]] = field(default_factory=dict)
     by_dispatch_key: dict[str, list[dict]] = field(default_factory=dict)
+    bindings_by_file: dict[str, list[dict]] = field(default_factory=dict)
+    ops_by_file: dict[str, set[str]] = field(default_factory=dict)
 
     py_modules: dict[str, Any] = field(default_factory=dict)
     py_classes: dict[str, list[Any]] = field(default_factory=dict)
@@ -56,11 +60,11 @@ class ServerState:
     opinfo_alias_map: dict[str, list[dict]] = field(default_factory=dict)
     opinfo_test_files: set[str] = field(default_factory=set)
     test_attr_index: dict[str, list[dict]] = field(default_factory=dict)
-    binding_bridge: dict[str, dict] = field(default_factory=dict)
     python_profiling: dict[str, dict[str, float]] = field(default_factory=dict)
     decomp_alias_map: dict[str, list[str]] = field(default_factory=dict)
     backward_to_forward: dict[str, list[str]] = field(default_factory=dict)
     kernel_impl_to_op: dict[str, str] = field(default_factory=dict)
+    dispatch_to_op: dict[str, str] = field(default_factory=dict)
 
     pytorch_source: str | None = None
     cpp_extractor: Any = None
@@ -186,8 +190,17 @@ def _parse_native_functions(source: str) -> tuple[dict, dict]:
     return functions, derivatives
 
 
-def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]:
-    """Find C++ implementations in source using configured search directories."""
+def _find_implementations(
+    source: str, functions: dict
+) -> tuple[dict[str, list[dict]], dict[str, str]]:
+    """Find C++ implementations in source using configured search directories.
+
+    Returns (impls, symbol_to_file). `impls` is YAML-targets-filtered as before.
+    `symbol_to_file` indexes ALL function definitions found in vendor backend
+    dirs (cudnn/miopen/mkldnn/...), bypassing the targets filter — needed for
+    helper functions like `run_cudnn_SDP_fprop` that aren't YAML ops but still
+    need a file-cohort bridge for test selection.
+    """
     src = Path(source)
 
     search_dirs = [src / d for d in CPP_SEARCH_DIRS]
@@ -215,6 +228,7 @@ def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]
     ]
 
     impls: dict[str, list[dict]] = {}
+    symbol_to_file: dict[str, str] = {}
     file_count = 0
 
     for search_dir in search_dirs:
@@ -233,10 +247,14 @@ def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]
             except Exception:
                 continue
 
+            in_vendor = is_vendor_path(file_str)
+
             file_count += 1
             for pattern in patterns:
                 for match in pattern.finditer(content):
                     func_name = match.group(1)
+                    if in_vendor:
+                        symbol_to_file.setdefault(func_name, file_str)
                     if func_name not in targets:
                         continue
 
@@ -256,9 +274,10 @@ def _find_implementations(source: str, functions: dict) -> dict[str, list[dict]]
 
     log.info(
         f"Found {sum(len(v) for v in impls.values())} "
-        f"implementations in {file_count} files"
+        f"implementations in {file_count} files; "
+        f"{len(symbol_to_file)} vendor-helper symbols indexed"
     )
-    return impls
+    return impls, symbol_to_file
 
 
 def _fuzzy_find(name: str, data: dict[str, Any]) -> list[Any] | None:
@@ -304,7 +323,7 @@ def _build_index(source: str) -> dict[str, Any]:
 
     functions, derivatives = _parse_native_functions(source)
 
-    implementations = _find_implementations(source, functions)
+    implementations, symbol_to_file = _find_implementations(source, functions)
 
     detector = BindingDetector()
     graph = detector.detect_bindings_in_directory(source)
@@ -315,6 +334,7 @@ def _build_index(source: str) -> dict[str, Any]:
         "native_functions": functions,
         "derivatives": derivatives,
         "native_implementations": implementations,
+        "symbol_to_file": symbol_to_file,
         "metadata": {
             "source_path": source,
             "source_fingerprint": _source_fingerprint(source),
@@ -334,6 +354,8 @@ def _build_indexes(state: ServerState):
     state.by_python_name.clear()
     state.by_cpp_name.clear()
     state.by_dispatch_key.clear()
+    state.bindings_by_file.clear()
+    state.dispatch_to_op.clear()
     for binding in state.bindings:
         if py_name := binding.get("python_name"):
             state.by_python_name.setdefault(py_name, []).append(binding)
@@ -341,6 +363,24 @@ def _build_indexes(state: ServerState):
             state.by_cpp_name.setdefault(cpp_name, []).append(binding)
         if dispatch := binding.get("dispatch_key"):
             state.by_dispatch_key.setdefault(dispatch, []).append(binding)
+        if file_path := binding.get("file_path"):
+            state.bindings_by_file.setdefault(file_path, []).append(binding)
+    # Reverse index: vendor-backend impl symbol → parent ATen op. Captures the
+    # `dispatch: { CUDA: cudnn_convolution_forward }` shape so a walk that lands
+    # on `cudnn_convolution_forward` resolves to `cudnn_convolution`.
+    for op_name, entry in state.native_functions.items():
+        for impl in entry.get("dispatch", {}).values():
+            if impl and impl != op_name:
+                state.dispatch_to_op.setdefault(impl, op_name)
+    # File → ops defined in it, derived from `native_implementations`. Used to
+    # bridge inner vendor-backend helpers (`raw_cudnn_convolution_forward_out`)
+    # to the registered op family in the same file (`cudnn_convolution`,
+    # `cudnn_convolution_transpose`, ...) when the call graph lacks edges.
+    state.ops_by_file.clear()
+    for op_name, impls in state.native_implementations.items():
+        for impl in impls:
+            if fp := impl.get("file_path"):
+                state.ops_by_file.setdefault(fp, set()).add(op_name)
 
 
 def _load_from_json(path: str):
@@ -356,6 +396,7 @@ def _load_from_json(path: str):
     _state.native_functions = data.get("native_functions", {})
     _state.derivatives = data.get("derivatives", {})
     _state.native_implementations = data.get("native_implementations", {})
+    _state.symbol_to_file = data.get("symbol_to_file", {})
 
     _build_indexes(_state)
 
@@ -511,24 +552,16 @@ def _init_from_source(source: str):
         _state.native_functions = data.get("native_functions", {})
         _state.derivatives = data.get("derivatives", {})
         _state.native_implementations = data.get("native_implementations", {})
+        _state.symbol_to_file = data.get("symbol_to_file", {})
         _build_indexes(_state)
 
     _state.pytorch_source = str(src)
-    _init_binding_bridge(str(src))
     _init_decomp_aliases(str(src))
     _init_backward_bridge()
     _init_dispatch_stubs(str(src))
     _init_cpp_call_graph(str(src))
     _init_python_modules(str(src))
     _init_test_infrastructure(str(src))
-
-
-def _init_binding_bridge(source: str):
-    """Build the qualname → schema → dispatch map from .pyi + native_functions.yaml."""
-    from .analysis.binding_bridge import build_binding_bridge
-
-    _state.binding_bridge = build_binding_bridge(source, _state.native_functions)
-    log.info(f"Binding bridge: {len(_state.binding_bridge)} qualnames")
 
 
 def _init_decomp_aliases(source: str):
@@ -1106,11 +1139,12 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
 
     if yaml_changed:
         functions, derivatives = _parse_native_functions(source)
-        implementations = _find_implementations(source, functions)
+        implementations, symbol_to_file = _find_implementations(source, functions)
     else:
         functions = prior.get("native_functions", {})
         derivatives = prior.get("derivatives", {})
         implementations = prior.get("native_implementations", {})
+        symbol_to_file = prior.get("symbol_to_file", {})
 
     data = {
         "bindings": new_bindings,
@@ -1118,6 +1152,7 @@ def update_index(source: str, since: str, on_uncovered: str = "warn") -> dict:
         "native_functions": functions,
         "derivatives": derivatives,
         "native_implementations": implementations,
+        "symbol_to_file": symbol_to_file,
         "metadata": {
             "source_path": source,
             "source_fingerprint": _source_fingerprint(source),
@@ -1326,5 +1361,4 @@ def build_index(source: str, wait_for_cpp: bool = True) -> dict:
         "nn_modules": len(_state.nn_modules),
         "test_files": len(_state.test_files),
         "test_functions": len(_state.test_functions),
-        "binding_bridge": len(_state.binding_bridge),
     }

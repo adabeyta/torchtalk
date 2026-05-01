@@ -8,6 +8,17 @@ CPP_SEARCH_DIRS = [
     "aten/src/ATen/cuda",
 ]
 
+# Vendor backend subdirs of `aten/src/ATen/native/` whose helper functions
+# follow the "many helpers, few registered ops" pattern. Symbols here that
+# aren't in `native_functions.yaml` still merit indexing for cohort fallback.
+VENDOR_BACKEND_DIRS = ("cudnn", "miopen", "mkldnn", "mkl", "mps")
+_VENDOR_DIR_MARKERS = tuple(f"/native/{v}/" for v in VENDOR_BACKEND_DIRS)
+
+
+def is_vendor_path(path: str) -> bool:
+    """True if `path` is inside an `aten/src/ATen/native/<vendor>/` subdir."""
+    return any(m in path for m in _VENDOR_DIR_MARKERS)
+
 PYTHON_SEARCH_DIRS = [
     "torch/nn",
     "torch/optim",

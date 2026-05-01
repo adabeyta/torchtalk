@@ -32,6 +32,10 @@ async def _do_affected(funcs: str, depth: int = 3) -> str:
         native_functions=_state.native_functions or None,
         native_implementations=_state.native_implementations or None,
         kernel_impl_to_op=_state.kernel_impl_to_op or None,
+        dispatch_to_op=_state.dispatch_to_op or None,
+        bindings_by_file=_state.bindings_by_file or None,
+        ops_by_file=_state.ops_by_file or None,
+        symbol_to_file=_state.symbol_to_file or None,
         depth=depth,
     )
 
