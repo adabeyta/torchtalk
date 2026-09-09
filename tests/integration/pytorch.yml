@@ -9,24 +9,29 @@ sparse_paths:
 
 anchors:
   - file: torch/csrc/Module.cpp
+    harness: pytorch
     check: pybind_name
     value: _WeakTensorRef
 
   - file: aten/src/ATen/native/RNN.cpp
+    harness: pytorch
     check: torch_library_cpp_name
     value: quantized_lstm
 
   - dir: aten/src/ATen/native/cuda
+    harness: pytorch
     check: has_cuda_kernel
     glob: "*.cu"
     content_filter: __global__
 
   - dir: aten/src/ATen/native
+    harness: pytorch
     check: has_at_dispatch
     glob: "*.cpp"
     content_filter: AT_DISPATCH
 
   - dir: torch/csrc/autograd
+    harness: pytorch
     check: has_binding_types
     value:
       - pybind_method

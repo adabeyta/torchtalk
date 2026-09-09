@@ -21,6 +21,9 @@ sparse_paths:
   - pkg/nn
 
 # Anchors: concrete facts about the pinned ref that the detectors must find.
+# Every anchor must name the harness that supplies its conventions. Add
+# `optional: true` only when an intentionally version-conditional path may be
+# absent; a missing required path fails the test.
 # Pick things that are stable across patch releases and cheap to verify by
 # hand (grep them first). Supported checks:
 #
@@ -34,18 +37,22 @@ sparse_paths:
 #                           (e.g. [pybind11, torch_library])
 anchors:
   - file: csrc/bindings.cpp
+    harness: your-harness
     check: pybind_name
     value: some_exported_function
 
   - file: csrc/ops.cpp
+    harness: your-harness
     check: torch_library_cpp_name
     value: some_cpp_impl
 
   - dir: csrc
+    harness: your-harness
     check: has_cuda_kernel
     glob: "*.cu"
     content_filter: __global__
 
   - dir: csrc
+    harness: your-harness
     check: has_binding_types
     value: [pybind11, torch_library]
