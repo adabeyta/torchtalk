@@ -13,12 +13,12 @@ tools) builds on it; PR-4 ships the primitive and the cheapest edge.
 ```python
 @dataclass(frozen=True)
 class ExternalRef:
-    from_symbol: str   # qualified symbol in the *referencing* package
-    to_name: str       # name as written ("torch.nn.Module", "at::empty")
-    kind: str          # import | op | cpp | base_class | provides | version_pin
-    evidence: str      # "path:line" — always points at real source
+    from_symbol: str  # qualified symbol in the *referencing* package
+    to_name: str  # name as written ("torch.nn.Module", "at::empty")
+    kind: str  # import | op | cpp | base_class | provides | version_pin
+    evidence: str  # "path:line" — always points at real source
     confidence: float  # 1.0 for syntactic facts, lower for heuristics
-    to_package: str    # harness name this ref resolves against ("pytorch")
+    to_package: str  # harness name this ref resolves against ("pytorch")
 ```
 
 `to_package` is an addition to the five-field sketch from the design notes:
